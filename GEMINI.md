@@ -26,7 +26,7 @@ The application is structured in a modular way, with clear separation of concern
 *   **Backend Framework:** FastAPI
 *   **Dependency Management:** uv
 *   **OCR/Parsing:** Azure Document Intelligence, Google Cloud Vision
-*   **Data Extraction:** OpenAI, Ollama
+*   **Data Extraction:** OpenAI
 *   **Linting and Formatting:** Ruff
 *   **Testing:** Pytest
 

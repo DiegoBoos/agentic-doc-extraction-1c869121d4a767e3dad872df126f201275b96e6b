@@ -85,24 +85,6 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "OPENAI_MODEL",
             "DOC_EXTRACTION_OPENAI_MODEL",
-            "NANO_MODEL",
-        ),
-    )
-
-    ollama_base_url: str | None = Field(
-        default="http://192.168.5.51:11434/",
-        validation_alias=AliasChoices(
-            "OLLAMA_BASE_URL",
-            "DOC_EXTRACTION_OLLAMA_BASE_URL",
-        ),
-    )
-
-    ollama_model: str = Field(
-        default="gpt-oss-20b",
-        validation_alias=AliasChoices(
-            "OLLAMA_MODEL",
-            "DOC_EXTRACTION_OLLAMA_MODEL",
-            "LOCAL_MODEL",
         ),
     )
 

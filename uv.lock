@@ -18,7 +18,6 @@ dependencies = [
     { name = "google-cloud-vision" },
     { name = "httpx" },
     { name = "landingai-ade" },
-    { name = "ollama" },
     { name = "openai" },
     { name = "psycopg2-binary" },
     { name = "pydantic-settings" },
@@ -42,7 +41,6 @@ requires-dist = [
     { name = "google-cloud-vision", specifier = ">=3.10.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "landingai-ade", specifier = ">=1.7.0" },
-    { name = "ollama", specifier = ">=0.6.1" },
     { name = "openai", specifier = ">=2.6.1" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
@@ -603,19 +601,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5c/69/86e1cba05045806bf3727f84e138fcba4a7e12df6af8e559642b6e4e2256/landingai_ade-1.7.0.tar.gz", hash = "sha256:7cbb71e43fec8f76b726113baa0e9ba45540434b528caaa10ad92fb9c81eb7db", size = 122025, upload-time = "2026-03-11T01:28:20.146Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/04/d0/588734bc2039d7de40951e4b06a8ca3d756a2bf93752b95a07c8987fd6a3/landingai_ade-1.7.0-py3-none-any.whl", hash = "sha256:35e9205420626e001eef1fb6a16185bf817c7499d7af344e26895af57b491153", size = 93717, upload-time = "2026-03-11T01:28:18.286Z" },
-]
-
-[[package]]
-name = "ollama"
-version = "0.6.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/9d/5a/652dac4b7affc2b37b95386f8ae78f22808af09d720689e3d7a86b6ed98e/ollama-0.6.1.tar.gz", hash = "sha256:478c67546836430034b415ed64fa890fd3d1ff91781a9d548b3325274e69d7c6", size = 51620, upload-time = "2025-11-13T23:02:17.416Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/4f/4a617ee93d8208d2bcf26b2d8b9402ceaed03e3853c754940e2290fed063/ollama-0.6.1-py3-none-any.whl", hash = "sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c", size = 14354, upload-time = "2025-11-13T23:02:16.292Z" },
 ]
 
 [[package]]

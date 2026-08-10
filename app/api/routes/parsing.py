@@ -119,8 +119,17 @@ async def parse_document(
                 if auth_item.get("numero_autorizacion") not in (None, "")
             ]
 
+            # Deduplicate by numero_autorizacion (14-digit), keeping first occurrence
+            seen: set[str] = set()
+            deduped: list[dict] = []
+            for auth_item in filtered:
+                num = auth_item.get("numero_autorizacion", "")
+                if num not in seen:
+                    seen.add(num)
+                    deduped.append(auth_item)
+
             if "authorizations" in data:
-                data["authorizations"] = filtered
+                data["authorizations"] = deduped
             else:
                 if not filtered:
                     data = {"authorizations": []}

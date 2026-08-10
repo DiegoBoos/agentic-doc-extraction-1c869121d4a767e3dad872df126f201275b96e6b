@@ -69,63 +69,24 @@ def _build_openai_client(*, api_key: str, base_url: str | None = None) -> AsyncO
     return AsyncOpenAI(**kwargs)
 
 
-def _build_ollama_client(*, base_url: str) -> AsyncOpenAI:
-    if not base_url.rstrip("/").endswith("/v1"):
-        base_url = base_url.rstrip("/") + "/v1"
-    return AsyncOpenAI(
-        base_url=base_url,
-        api_key="ollama",
-        timeout=_TIMEOUT,
-        max_retries=_MAX_RETRIES,
-    )
-
-
 class OpenAIExtractorService:
     def __init__(self, settings: Settings) -> None:
         provider = settings.model_provider.lower()
+        if provider != "openai":
+            raise RuntimeError(f"Unsupported model_provider: '{provider}'. Only 'openai' is supported.")
 
-        self.primary_client: AsyncOpenAI | None = None
-        self.primary_model: str | None = None
-        self.fallback_client: AsyncOpenAI | None = None
-        self.fallback_model: str | None = None
+        if not settings.openai_api_key:
+            raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY.")
 
-        # --- primary ---
-        if provider == "openai":
-            if not settings.openai_api_key:
-                raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY.")
-            self.primary_client = _build_openai_client(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
-            self.primary_model = settings.openai_model
-        elif provider == "ollama":
-            ollama_url = settings.ollama_base_url or "http://localhost:11434"
-            self.primary_client = _build_ollama_client(base_url=ollama_url)
-            self.primary_model = settings.ollama_model
-        else:
-            raise RuntimeError(f"Unsupported model_provider: '{provider}'")
-
-        # --- fallback (the other one, if configured) ---
-        if provider == "openai" and settings.ollama_base_url:
-            self.fallback_client = _build_ollama_client(base_url=settings.ollama_base_url)
-            self.fallback_model = settings.ollama_model
-        elif provider == "ollama" and settings.openai_api_key:
-            self.fallback_client = _build_openai_client(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
-            self.fallback_model = settings.openai_model
+        self.client = _build_openai_client(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+        )
+        self.model = settings.openai_model
 
         logger.info(
-            "LLM extractor ready | primary=%s (%s) fallback=%s (%s)",
-            provider,
-            self.primary_model,
-            "ollama"
-            if provider == "openai" and self.fallback_client
-            else "openai"
-            if provider == "ollama" and self.fallback_client
-            else "none",
-            self.fallback_model or "-",
+            "LLM extractor ready | provider=openai model=%s",
+            self.model,
         )
 
     async def extract_authorization(self, markdown: str) -> tuple[AuthorizationResponse, int, int]:
@@ -161,48 +122,18 @@ class OpenAIExtractorService:
         user_content: str,
         response_model: type[StructuredResponseT],
     ) -> tuple[StructuredResponseT, int, int]:
-        # Try primary
         try:
             return await self._call_llm(
-                self.primary_client,
-                self.primary_model,
+                self.client,
+                self.model,
                 system_prompt,
                 user_content,
                 response_model,
             )
-        except (APIConnectionError, APITimeoutError) as primary_exc:
-            logger.error(
-                "Primary LLM unavailable | model=%s error=%s",
-                self.primary_model,
-                primary_exc,
-            )
-
-            # Try fallback
-            if self.fallback_client is None:
-                raise LLMConnectionError(
-                    f"LLM service unavailable ({type(primary_exc).__name__}): {primary_exc}"
-                ) from primary_exc
-
-            logger.info("Attempting fallback LLM | model=%s", self.fallback_model)
-            try:
-                return await self._call_llm(
-                    self.fallback_client,
-                    self.fallback_model,
-                    system_prompt,
-                    user_content,
-                    response_model,
-                )
-            except (APIConnectionError, APITimeoutError) as fallback_exc:
-                logger.error(
-                    "Fallback LLM also unavailable | model=%s error=%s",
-                    self.fallback_model,
-                    fallback_exc,
-                )
-                raise LLMConnectionError(
-                    f"All LLM providers unavailable. "
-                    f"Primary ({self.primary_model}): {primary_exc} | "
-                    f"Fallback ({self.fallback_model}): {fallback_exc}"
-                ) from fallback_exc
+        except (APIConnectionError, APITimeoutError) as exc:
+            raise LLMConnectionError(
+                f"LLM service unavailable ({type(exc).__name__}): {exc}"
+            ) from exc
 
     async def _call_llm(
         self,
