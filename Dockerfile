@@ -4,14 +4,12 @@ FROM python:3.12-slim AS builder
 # Set working directory
 WORKDIR /app
 
-# Install uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-# Install system dependencies for building
+# Install build dependencies and uv without relying on GHCR side images
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libpq-dev \
+    && pip install --no-cache-dir uv \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files
@@ -43,6 +41,10 @@ COPY README.md ./
 
 # Set PATH to use venv
 ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV WEB_CONCURRENCY=2
+ENV UVICORN_LIMIT_CONCURRENCY=16
+ENV UVICORN_TIMEOUT_KEEP_ALIVE=10
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
@@ -52,8 +54,8 @@ USER appuser
 EXPOSE 5090
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=20s --start-period=30s --retries=5 \
+HEALTHCHECK --interval=30s --timeout=20s --start-period=45s --retries=5 \
     CMD curl -f http://localhost:5090/health || exit 1
 
-# Run the application (Corrected to app.main:app as per project structure)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5090"]
+# Run the application with configurable worker/concurrency settings
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 5090 --workers ${WEB_CONCURRENCY:-2} --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY:-16} --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE:-10}"]

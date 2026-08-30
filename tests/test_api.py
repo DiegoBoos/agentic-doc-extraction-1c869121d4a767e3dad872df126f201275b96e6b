@@ -35,7 +35,7 @@ def test_parse_endpoint_with_mocked_openai_structured_output() -> None:
 
         class _MockExtractor:
             async def extract_authorization(
-                self, _markdown: str
+                self, _markdown: str, _document_chunks=None
             ) -> tuple[AuthorizationResponse, int, int]:
                 return (
                     AuthorizationResponse(
@@ -73,7 +73,7 @@ def test_parse_endpoint_filters_null_authorization_number() -> None:
 
         class _MockExtractor:
             async def extract_authorization(
-                self, _markdown: str
+                self, _markdown: str, _document_chunks=None
             ) -> tuple[AuthorizationResponse, int, int]:
                 return (
                     AuthorizationResponse(authorizations=[AuthorizationExtraction()]),
@@ -145,6 +145,8 @@ def test_extract_patient_endpoint_with_mocked_structured_output(tmp_path: Path) 
     assert data["patient"]["nombre_completo"] == "Ana Gomez"
     assert data["patient"]["direccion"] == "Calle 1"
     assert data["patient"]["telefonos"]["movil"] == "3001234567"
+    assert "fhir" in data
+    assert data["fhir"]["resourceType"] == "Patient"
     assert calls["document_id"] == data["document_id"]
 
 

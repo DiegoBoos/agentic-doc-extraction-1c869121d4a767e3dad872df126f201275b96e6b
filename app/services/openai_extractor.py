@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
-from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI, BadRequestError
 from pydantic import BaseModel
 
 from app.core.config import Settings
 from app.schemas.authorization import AuthorizationResponse
 from app.schemas.patient import PatientExtractionResponse
+from app.services.authorization_chunking import TextChunk, build_authorization_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,12 @@ class LLMConnectionError(Exception):
     """Raised when the LLM service is unreachable or times out."""
 
 
+class ContextWindowExceededError(ValueError):
+    """Raised when the markdown still exceeds the model context window after chunking."""
+
+
 def _build_openai_client(*, api_key: str, base_url: str | None = None) -> AsyncOpenAI:
-    kwargs: dict = dict(
+    kwargs: dict[str, Any] = dict(
         api_key=api_key,
         timeout=_TIMEOUT,
         max_retries=_MAX_RETRIES,
@@ -73,7 +78,9 @@ class OpenAIExtractorService:
     def __init__(self, settings: Settings) -> None:
         provider = settings.model_provider.lower()
         if provider != "openai":
-            raise RuntimeError(f"Unsupported model_provider: '{provider}'. Only 'openai' is supported.")
+            raise RuntimeError(
+                f"Unsupported model_provider: '{provider}'. Only 'openai' is supported."
+            )
 
         if not settings.openai_api_key:
             raise RuntimeError("OpenAI API key is not configured. Set OPENAI_API_KEY.")
@@ -83,22 +90,86 @@ class OpenAIExtractorService:
             base_url=settings.openai_base_url,
         )
         self.model = settings.openai_model
+        self.max_input_tokens = settings.openai_max_input_tokens
+        self.chunk_target_tokens = settings.openai_chunk_target_tokens
+        self.chunk_max_pages = settings.openai_chunk_max_pages
+        self.chunk_overlap_pages = settings.openai_chunk_overlap_pages
 
         logger.info(
-            "LLM extractor ready | provider=openai model=%s",
+            "LLM extractor ready | provider=openai model=%s max_input_tokens=%s "
+            "chunk_target_tokens=%s chunk_max_pages=%s",
+            self.model,
+            self.max_input_tokens,
+            self.chunk_target_tokens,
+            self.chunk_max_pages,
+        )
+
+    async def extract_authorization(
+        self,
+        markdown: str,
+        document_chunks: list[dict[str, Any]] | None = None,
+    ) -> tuple[AuthorizationResponse, int, int]:
+        text_chunks = build_authorization_chunks(
+            markdown=markdown,
+            chunks=document_chunks,
+            max_input_tokens=self.max_input_tokens,
+            target_chunk_tokens=self.chunk_target_tokens,
+            max_pages_per_chunk=self.chunk_max_pages,
+            overlap_pages=self.chunk_overlap_pages,
+        )
+
+        if len(text_chunks) == 1:
+            try:
+                return await self._extract_authorization_from_text(
+                    text_chunks[0],
+                    is_fragment=False,
+                )
+            except ContextWindowExceededError:
+                logger.warning(
+                    "Context window exceeded on single-pass extraction; "
+                    "retrying in forced chunk mode"
+                )
+                text_chunks = build_authorization_chunks(
+                    markdown=markdown,
+                    chunks=None,
+                    max_input_tokens=1,
+                    target_chunk_tokens=max(4000, self.chunk_target_tokens // 2),
+                    max_pages_per_chunk=1,
+                    overlap_pages=0,
+                )
+
+        merged: list = []
+        total_input_tokens = 0
+        total_output_tokens = 0
+
+        logger.info(
+            "Chunked authorization extraction | chunks=%s model=%s",
+            len(text_chunks),
             self.model,
         )
 
-    async def extract_authorization(self, markdown: str) -> tuple[AuthorizationResponse, int, int]:
-        user_content = (
-            "Extrae todas las autorizaciones médicas del siguiente markdown y responde "
-            "en el esquema estructurado.\n\n"
-            f"{markdown}"
-        )
-        return await self._extract_structured(
-            system_prompt=SYSTEM_PROMPT,
-            user_content=user_content,
-            response_model=AuthorizationResponse,
+        for index, chunk in enumerate(text_chunks, start=1):
+            logger.info(
+                "Processing authorization chunk %s/%s | scope=%s estimated_tokens=%s",
+                index,
+                len(text_chunks),
+                chunk.label,
+                chunk.estimated_tokens,
+            )
+            result, chunk_input_tokens, chunk_output_tokens = (
+                await self._extract_authorization_from_text(
+                    chunk,
+                    is_fragment=True,
+                )
+            )
+            merged.extend(result.authorizations)
+            total_input_tokens += chunk_input_tokens
+            total_output_tokens += chunk_output_tokens
+
+        return (
+            AuthorizationResponse(authorizations=merged),
+            total_input_tokens,
+            total_output_tokens,
         )
 
     async def extract_patient_data(
@@ -113,6 +184,31 @@ class OpenAIExtractorService:
             system_prompt=PATIENT_SYSTEM_PROMPT,
             user_content=user_content,
             response_model=PatientExtractionResponse,
+        )
+
+    async def _extract_authorization_from_text(
+        self,
+        chunk: TextChunk,
+        *,
+        is_fragment: bool,
+    ) -> tuple[AuthorizationResponse, int, int]:
+        if is_fragment:
+            user_content = (
+                "Extrae todas las autorizaciones médicas del siguiente fragmento del documento "
+                "y responde en el esquema estructurado.\n\n"
+                f"{chunk.text}"
+            )
+        else:
+            user_content = (
+                "Extrae todas las autorizaciones médicas del siguiente markdown y responde "
+                "en el esquema estructurado.\n\n"
+                f"{chunk.text}"
+            )
+
+        return await self._extract_structured(
+            system_prompt=SYSTEM_PROMPT,
+            user_content=user_content,
+            response_model=AuthorizationResponse,
         )
 
     async def _extract_structured(
@@ -143,14 +239,22 @@ class OpenAIExtractorService:
         user_content: str,
         response_model: type[StructuredResponseT],
     ) -> tuple[StructuredResponseT, int, int]:
-        response = await client.responses.parse(
-            model=model,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            text_format=response_model,
-        )
+        try:
+            response = await client.responses.parse(
+                model=model,
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                text_format=response_model,
+            )
+        except BadRequestError as exc:
+            if self._is_context_window_error(exc):
+                raise ContextWindowExceededError(
+                    "El documento excede la ventana de contexto del modelo y "
+                    "requiere fragmentación adicional."
+                ) from exc
+            raise
 
         if response.output_parsed is None:
             raise RuntimeError("LLM returned no structured output.")
@@ -167,3 +271,14 @@ class OpenAIExtractorService:
                 tokens_output = 0
 
         return response.output_parsed, tokens_input, tokens_output
+
+    @staticmethod
+    def _is_context_window_error(exc: BadRequestError) -> bool:
+        body = getattr(exc, "body", None)
+        if isinstance(body, dict):
+            error = body.get("error") or {}
+            if error.get("code") == "context_length_exceeded":
+                return True
+            message = str(error.get("message") or "")
+            return "context window" in message.lower()
+        return "context window" in str(exc).lower()

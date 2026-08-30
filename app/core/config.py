@@ -9,6 +9,48 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     parse_output_dir: Path = Path("data/parsed")
     max_upload_size_mb: int = 50
+    processing_max_concurrent_documents: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "PROCESSING_MAX_CONCURRENT_DOCUMENTS",
+            "DOC_EXTRACTION_PROCESSING_MAX_CONCURRENT_DOCUMENTS",
+        ),
+    )
+    processing_large_document_page_threshold: int = Field(
+        default=50,
+        validation_alias=AliasChoices(
+            "PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
+            "DOC_EXTRACTION_PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
+        ),
+    )
+    openai_max_input_tokens: int = Field(
+        default=45000,
+        validation_alias=AliasChoices(
+            "OPENAI_MAX_INPUT_TOKENS",
+            "DOC_EXTRACTION_OPENAI_MAX_INPUT_TOKENS",
+        ),
+    )
+    openai_chunk_target_tokens: int = Field(
+        default=24000,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_TARGET_TOKENS",
+            "DOC_EXTRACTION_OPENAI_CHUNK_TARGET_TOKENS",
+        ),
+    )
+    openai_chunk_max_pages: int = Field(
+        default=12,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_MAX_PAGES",
+            "DOC_EXTRACTION_OPENAI_CHUNK_MAX_PAGES",
+        ),
+    )
+    openai_chunk_overlap_pages: int = Field(
+        default=1,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_OVERLAP_PAGES",
+            "DOC_EXTRACTION_OPENAI_CHUNK_OVERLAP_PAGES",
+        ),
+    )
     allowed_upload_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"]
     allowed_upload_content_types: list[str] = [
         "application/pdf",

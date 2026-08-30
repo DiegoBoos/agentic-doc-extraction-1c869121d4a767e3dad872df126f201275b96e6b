@@ -6,12 +6,14 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import health, parsing, patient
 from app.core.config import Settings
+from app.db.connectiondb import ensure_billing_schema
 from app.services.document_parser import (
     AzureDocumentIntelligenceParser,
     DocumentParserRouter,
     GoogleCloudVisionParser,
 )
 from app.services.openai_extractor import OpenAIExtractorService
+from app.services.processing_limiter import ProcessingLimiter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,10 +58,19 @@ async def lifespan(app: FastAPI):
     )
 
     extractor = OpenAIExtractorService(settings=settings)
+    processing_limiter = ProcessingLimiter(settings.processing_max_concurrent_documents)
+    ensure_billing_schema()
+
+    logger.info(
+        "Processing limiter ready | max_concurrent_documents=%s large_document_threshold=%s",
+        settings.processing_max_concurrent_documents,
+        settings.processing_large_document_page_threshold,
+    )
 
     app.state.settings = settings
     app.state.parser = parser
     app.state.extractor = extractor
+    app.state.processing_limiter = processing_limiter
     yield
 
 

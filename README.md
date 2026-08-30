@@ -20,6 +20,21 @@ uv run uvicorn app.main:app --reload
 
 ## Variables de entorno
 
+### Concurrencia y robustez
+
+```bash
+export PROCESSING_MAX_CONCURRENT_DOCUMENTS=2
+export PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD=50
+export OPENAI_MAX_INPUT_TOKENS=45000
+export OPENAI_CHUNK_TARGET_TOKENS=24000
+export OPENAI_CHUNK_MAX_PAGES=12
+export OPENAI_CHUNK_OVERLAP_PAGES=1
+export DATABASE_POOL_MIN=1
+export DATABASE_POOL_MAX=8
+export WEB_CONCURRENCY=2
+export UVICORN_LIMIT_CONCURRENCY=16
+```
+
 ### Azure Document Intelligence
 
 ```bash
@@ -33,7 +48,16 @@ export DOC_EXTRACTION_AZURE_DOCUMENT_INTELLIGENCE_MODEL=prebuilt-read
 
 ### `POST /api/v1/parse`
 
-Recibe un archivo, lo guarda localmente, lo parsea con el proveedor seleccionado y luego extrae campos útiles de autorizaciones médica:
+Recibe un archivo, lo guarda localmente, lo parsea con el proveedor seleccionado y luego extrae campos útiles de autorizaciones médica.
+
+Para soportar documentos grandes y mayor concurrencia, la extracción ahora:
+
+- limita la cantidad de documentos pesados que se procesan en paralelo,
+- mueve el OCR bloqueante fuera del event loop principal,
+- fragmenta documentos grandes antes de enviarlos al LLM,
+- y reutiliza conexiones a PostgreSQL mediante pool.
+
+Campos extraídos:
 
 - `authorization_numbers`
 - `primary_authorization_number`

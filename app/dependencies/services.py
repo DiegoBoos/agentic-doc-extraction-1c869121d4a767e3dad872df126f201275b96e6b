@@ -3,6 +3,7 @@ from fastapi import Header, HTTPException, Request
 from app.core.config import Settings
 from app.services.document_parser import DocumentParserRouter
 from app.services.openai_extractor import OpenAIExtractorService
+from app.services.processing_limiter import ProcessingLimiter
 
 
 def get_settings(request: Request) -> Settings:
@@ -29,3 +30,10 @@ def get_extractor(request: Request) -> OpenAIExtractorService:
     if extractor is None:
         raise HTTPException(status_code=500, detail="OpenAI extractor is not configured")
     return extractor
+
+
+def get_processing_limiter(request: Request) -> ProcessingLimiter:
+    limiter = getattr(request.app.state, "processing_limiter", None)
+    if limiter is None:
+        raise HTTPException(status_code=500, detail="Processing limiter is not configured")
+    return limiter
