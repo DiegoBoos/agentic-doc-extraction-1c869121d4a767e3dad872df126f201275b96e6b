@@ -48,11 +48,11 @@ ENV WEB_CONCURRENCY=2
 ENV UVICORN_LIMIT_CONCURRENCY=16
 ENV UVICORN_TIMEOUT_KEEP_ALIVE=10
 
-# Create non-root user
+# Keep runtime as root so Dokploy/Docker named volumes mounted at /app/data
+# remain writable without a separate init container/chown step.
 RUN chmod +x /app/docker-entrypoint.sh \
     && useradd -m -u 1000 appuser \
     && chown -R appuser:appuser /app
-USER appuser
 
 # Expose port
 EXPOSE 5090

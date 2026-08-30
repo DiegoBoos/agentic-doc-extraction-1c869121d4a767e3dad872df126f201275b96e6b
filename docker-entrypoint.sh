@@ -3,6 +3,8 @@ set -eu
 
 ROLE="${APP_ROLE:-api}"
 
+mkdir -p /app/data/uploads /app/data/parsed
+
 if [ "$ROLE" = "worker" ]; then
   exec python -m app.worker
 fi
