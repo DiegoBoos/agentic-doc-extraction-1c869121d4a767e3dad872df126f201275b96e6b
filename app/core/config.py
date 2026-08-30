@@ -94,7 +94,7 @@ class Settings(BaseSettings):
         ),
     )
     max_upload_pages: int = Field(
-        default=20,
+        default=50,
         validation_alias=AliasChoices(
             "MAX_UPLOAD_PAGES",
             "DOC_EXTRACTION_MAX_UPLOAD_PAGES",
