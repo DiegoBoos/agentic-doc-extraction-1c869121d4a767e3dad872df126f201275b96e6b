@@ -100,6 +100,7 @@ class JobCoordinator:
         mapping = {
             "llm_unavailable": status.HTTP_503_SERVICE_UNAVAILABLE,
             "validation_error": status.HTTP_400_BAD_REQUEST,
+            "document_too_large": status.HTTP_400_BAD_REQUEST,
             "internal_error": status.HTTP_500_INTERNAL_SERVER_ERROR,
         }
         return HTTPException(

@@ -4,6 +4,7 @@ import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
 from app.dependencies.services import (
@@ -21,7 +22,6 @@ from app.services.openai_extractor import OpenAIExtractorService
 from app.services.processing_limiter import ProcessingLimiter
 from app.services.processing_pipeline import (
     JOB_TYPE_PATIENT,
-    DocumentTooManyPagesError,
     _count_pdf_pages,
     cleanup_processing_artifacts,
 )
@@ -77,16 +77,21 @@ async def extract_patient(
         page_count = _count_pdf_pages(Path(saved.stored_path))
         if page_count is not None and page_count > max_pages:
             await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
-            return {
-                "error": True,
-                "error_type": "document_too_large",
-                "detail": f"El documento '{saved.filename}' tiene {page_count} p\u00e1ginas "
-                           f"y excede el m\u00e1ximo permitido de {max_pages}.",
-                "filename": saved.filename,
-                "pages": page_count,
-                "max_pages": max_pages,
-                "document_id": saved.id,
-            }
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": True,
+                    "error_type": "document_too_large",
+                    "detail": (
+                        f"El documento '{saved.filename}' tiene {page_count} páginas "
+                        f"y excede el máximo permitido de {max_pages}."
+                    ),
+                    "filename": saved.filename,
+                    "pages": page_count,
+                    "max_pages": max_pages,
+                    "document_id": saved.id,
+                },
+            )
 
     if coordinator is not None:
         try:
