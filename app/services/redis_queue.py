@@ -6,7 +6,14 @@ from redis.asyncio import Redis
 class RedisJobQueue:
     def __init__(self, *, redis_url: str, queue_name: str) -> None:
         self.queue_name = queue_name
-        self.client = Redis.from_url(redis_url, decode_responses=True)
+        # socket_timeout must exceed the longest BLPOP timeout to avoid
+        # the client killing the connection while Redis is still blocking.
+        self.client = Redis.from_url(
+            redis_url,
+            decode_responses=True,
+            socket_timeout=30.0,
+            socket_connect_timeout=10.0,
+        )
 
     async def ping(self) -> None:
         await self.client.ping()
