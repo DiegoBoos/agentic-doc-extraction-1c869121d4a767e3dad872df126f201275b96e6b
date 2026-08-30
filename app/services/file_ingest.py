@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ class SavedUpload:
     size_bytes: int
     stored_path: str
     created_at: datetime
+    file_hash: str
 
 
 async def save_upload(
@@ -48,6 +50,7 @@ async def save_upload(
     destination = upload_dir / f"{upload_id}-{safe_name}"
 
     size = 0
+    digest = hashlib.sha256()
     with destination.open("wb") as handle:
         while True:
             chunk = await file.read(1024 * 1024)
@@ -59,6 +62,7 @@ async def save_upload(
                 destination.unlink(missing_ok=True)
                 raise FileTooLargeError(size_bytes=size, max_size_bytes=max_size_bytes)
             handle.write(chunk)
+            digest.update(chunk)
 
     return SavedUpload(
         id=upload_id,
@@ -67,4 +71,5 @@ async def save_upload(
         size_bytes=size,
         stored_path=str(destination),
         created_at=datetime.now(UTC),
+        file_hash=digest.hexdigest(),
     )

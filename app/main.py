@@ -5,15 +5,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.api.routes import health, parsing, patient
-from app.core.config import Settings
 from app.db.connectiondb import ensure_billing_schema
-from app.services.document_parser import (
-    AzureDocumentIntelligenceParser,
-    DocumentParserRouter,
-    GoogleCloudVisionParser,
-)
-from app.services.openai_extractor import OpenAIExtractorService
-from app.services.processing_limiter import ProcessingLimiter
+from app.services.runtime import build_runtime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,54 +17,25 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = Settings()
-
-    parsers = {}
-
-    try:
-        parsers["google_vision"] = GoogleCloudVisionParser(
-            output_root=settings.parse_output_dir,
-            credentials_file=settings.google_vision_credentials_file,
-        )
-    except Exception as exc:
-        print(f"WARNING: Google Cloud Vision could not be initialized: {exc}")
-
-    if settings.azure_document_intelligence_endpoint and settings.azure_document_intelligence_key:
-        parsers["azure"] = AzureDocumentIntelligenceParser(
-            output_root=settings.parse_output_dir,
-            endpoint=settings.azure_document_intelligence_endpoint,
-            key=settings.azure_document_intelligence_key,
-            model=settings.azure_document_intelligence_model,
-        )
-    else:
-        logger.warning("Azure Document Intelligence is not configured.")
-
-    default_provider = (
-        settings.ocr_provider
-        if settings.ocr_provider in parsers
-        else next(iter(parsers), "google_vision")
-    )
-
-    parser = DocumentParserRouter(
-        default_provider=default_provider,
-        parsers=parsers,
-    )
-
-    extractor = OpenAIExtractorService(settings=settings)
-    processing_limiter = ProcessingLimiter(settings.processing_max_concurrent_documents)
+    runtime = await build_runtime()
     ensure_billing_schema()
 
     logger.info(
-        "Processing limiter ready | max_concurrent_documents=%s large_document_threshold=%s",
-        settings.processing_max_concurrent_documents,
-        settings.processing_large_document_page_threshold,
+        "Runtime ready | queue_enabled=%s max_concurrent_documents=%s large_document_threshold=%s",
+        runtime.settings.queue_enabled,
+        runtime.settings.processing_max_concurrent_documents,
+        runtime.settings.processing_large_document_page_threshold,
     )
 
-    app.state.settings = settings
-    app.state.parser = parser
-    app.state.extractor = extractor
-    app.state.processing_limiter = processing_limiter
+    app.state.settings = runtime.settings
+    app.state.parser = runtime.parser
+    app.state.extractor = runtime.extractor
+    app.state.processing_limiter = runtime.processing_limiter
+    app.state.job_queue = runtime.job_queue
     yield
+
+    if runtime.job_queue is not None:
+        await runtime.job_queue.close()
 
 
 app = FastAPI(

@@ -9,6 +9,76 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     parse_output_dir: Path = Path("data/parsed")
     max_upload_size_mb: int = 50
+    job_queue_mode: str = Field(
+        default="direct",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_MODE",
+            "DOC_EXTRACTION_JOB_QUEUE_MODE",
+        ),
+    )
+    job_queue_name: str = Field(
+        default="agentic-doc-extraction:jobs",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_NAME",
+            "DOC_EXTRACTION_JOB_QUEUE_NAME",
+        ),
+    )
+    job_queue_wait_timeout_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_WAIT_TIMEOUT_SECONDS",
+            "DOC_EXTRACTION_JOB_QUEUE_WAIT_TIMEOUT_SECONDS",
+        ),
+    )
+    job_queue_poll_interval_ms: int = Field(
+        default=500,
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_POLL_INTERVAL_MS",
+            "DOC_EXTRACTION_JOB_QUEUE_POLL_INTERVAL_MS",
+        ),
+    )
+    redis_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REDIS_URL",
+            "DOC_EXTRACTION_REDIS_URL",
+        ),
+    )
+    redis_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices(
+            "REDIS_HOST",
+            "DOC_EXTRACTION_REDIS_HOST",
+        ),
+    )
+    redis_port: int = Field(
+        default=6379,
+        validation_alias=AliasChoices(
+            "REDIS_PORT",
+            "DOC_EXTRACTION_REDIS_PORT",
+        ),
+    )
+    redis_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REDIS_PASSWORD",
+            "DOC_EXTRACTION_REDIS_PASSWORD",
+        ),
+    )
+    redis_db: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "REDIS_DB",
+            "DOC_EXTRACTION_REDIS_DB",
+        ),
+    )
+    worker_role: str = Field(
+        default="api",
+        validation_alias=AliasChoices(
+            "APP_ROLE",
+            "DOC_EXTRACTION_APP_ROLE",
+        ),
+    )
     processing_max_concurrent_documents: int = Field(
         default=2,
         validation_alias=AliasChoices(
@@ -137,6 +207,18 @@ class Settings(BaseSettings):
             "DOC_EXTRACTION_DATABASE_URL",
         ),
     )
+
+    @property
+    def resolved_redis_url(self) -> str:
+        if self.redis_url:
+            return self.redis_url
+
+        auth = f":{self.redis_password}@" if self.redis_password else ""
+        return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def queue_enabled(self) -> bool:
+        return self.job_queue_mode.lower() == "redis"
 
     model_config = SettingsConfigDict(
         env_file=".env",

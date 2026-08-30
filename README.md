@@ -35,6 +35,23 @@ export WEB_CONCURRENCY=2
 export UVICORN_LIMIT_CONCURRENCY=16
 ```
 
+### Jobs / cola interna
+
+```bash
+# modo clásico (sin cola)
+export JOB_QUEUE_MODE=direct
+
+# modo escalable con Redis + worker
+export JOB_QUEUE_MODE=redis
+export REDIS_HOST=127.0.0.1
+export REDIS_PORT=6379
+export REDIS_PASSWORD=""
+export REDIS_DB=0
+export JOB_QUEUE_NAME=agentic-doc-extraction:jobs
+export JOB_QUEUE_WAIT_TIMEOUT_SECONDS=900
+export JOB_QUEUE_POLL_INTERVAL_MS=500
+```
+
 ### Azure Document Intelligence
 
 ```bash
@@ -55,7 +72,28 @@ Para soportar documentos grandes y mayor concurrencia, la extracción ahora:
 - limita la cantidad de documentos pesados que se procesan en paralelo,
 - mueve el OCR bloqueante fuera del event loop principal,
 - fragmenta documentos grandes antes de enviarlos al LLM,
-- y reutiliza conexiones a PostgreSQL mediante pool.
+- reutiliza conexiones a PostgreSQL mediante pool,
+- y puede correr en modo **job/cola** sin romper el contrato síncrono del endpoint.
+
+### Modo job/cola sin romper el contrato HTTP
+
+El cliente sigue llamando a:
+
+```http
+POST /api/v1/parse
+```
+
+Y sigue recibiendo el **JSON final en la misma request**.
+
+La diferencia es interna:
+
+1. la API guarda el archivo,
+2. crea un `processing_job` en PostgreSQL,
+3. encola el `job_id` en Redis,
+4. un worker separado procesa OCR + LLM,
+5. la API espera el resultado del job y responde el mismo JSON final.
+
+Esto permite escalar workers por separado sin bloquear el proceso HTTP con OCR/LLM pesado.
 
 Campos extraídos:
 
@@ -76,6 +114,28 @@ Campos extraídos:
 - uploads: `data/uploads/`
 - parse outputs: `data/parsed/<document_id>/`
 - markdown: `data/parsed/<document_id>/<archivo>.md`
+
+## Worker
+
+La misma imagen sirve para API o worker.
+
+### API
+
+```bash
+export APP_ROLE=api
+uv run uvicorn app.main:app --reload
+```
+
+### Worker
+
+```bash
+export APP_ROLE=worker
+uv run python -m app.worker
+```
+
+En Dokploy puedes desplegar dos servicios desde la misma rama/imagen:
+- uno con `APP_ROLE=api`
+- otro con `APP_ROLE=worker`
 
 ## Tests y calidad
 

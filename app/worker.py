@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from app.db.connectiondb import ensure_billing_schema
+from app.services.job_orchestrator import process_job
+from app.services.runtime import build_runtime
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+async def run_worker() -> None:
+    runtime = await build_runtime()
+    ensure_billing_schema()
+
+    if runtime.job_queue is None:
+        raise RuntimeError("Worker requires JOB_QUEUE_MODE=redis and a valid Redis connection.")
+
+    max_in_flight = max(1, runtime.settings.processing_max_concurrent_documents)
+    in_flight: set[asyncio.Task] = set()
+
+    logger.info(
+        "Worker ready | queue=%s max_in_flight=%s",
+        runtime.settings.job_queue_name,
+        max_in_flight,
+    )
+
+    try:
+        while True:
+            while len(in_flight) >= max_in_flight:
+                done, pending = await asyncio.wait(
+                    in_flight,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                in_flight = set(pending)
+                for task in done:
+                    task.result()
+
+            job_id = await runtime.job_queue.dequeue(timeout_seconds=5)
+            if job_id is None:
+                continue
+
+            task = asyncio.create_task(process_job(runtime, job_id))
+            in_flight.add(task)
+            task.add_done_callback(in_flight.discard)
+    finally:
+        if runtime.job_queue is not None:
+            await runtime.job_queue.close()
+
+
+def main() -> None:
+    asyncio.run(run_worker())
+
+
+if __name__ == "__main__":
+    main()

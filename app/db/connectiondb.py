@@ -3,9 +3,11 @@ from __future__ import annotations
 import os
 import threading
 from contextlib import contextmanager
-from typing import Iterator
+from datetime import UTC, datetime
+from typing import Any, Iterator
 
 import psycopg2
+from psycopg2.extras import Json, RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 
 _pool: ThreadedConnectionPool | None = None
@@ -81,7 +83,7 @@ def ensure_billing_schema() -> None:
                         tokens_output INT,
                         openai_tokens INT,
                         processed_authorizations INT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
                     );
                     """
                 )
@@ -114,11 +116,45 @@ def ensure_billing_schema() -> None:
                     ALTER TABLE billing_metadata DROP COLUMN IF EXISTS azure_credits_left;
                     """
                 )
+                cursor.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS processing_jobs (
+                        job_id VARCHAR(255) PRIMARY KEY,
+                        job_type VARCHAR(64) NOT NULL,
+                        document_id VARCHAR(255) NOT NULL,
+                        file_hash VARCHAR(64),
+                        filename VARCHAR(255) NOT NULL,
+                        content_type VARCHAR(255),
+                        size_bytes BIGINT NOT NULL,
+                        stored_path TEXT NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        result_payload JSONB,
+                        error_type VARCHAR(64),
+                        error_message TEXT,
+                        metadata JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        started_at TIMESTAMPTZ,
+                        finished_at TIMESTAMPTZ
+                    );
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_processing_jobs_status_created
+                    ON processing_jobs (status, created_at);
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_processing_jobs_job_type_hash
+                    ON processing_jobs (job_type, file_hash);
+                    """
+                )
                 conn.commit()
                 _schema_ready = True
             except Exception as exc:
                 conn.rollback()
-                print("Error al preparar billing_metadata:", exc)
+                print("Error al preparar esquemas de facturación/jobs:", exc)
             finally:
                 cursor.close()
 
@@ -202,6 +238,193 @@ def save_billing_metadata(
         except Exception as exc:
             print("Error al guardar metadata de facturación:", exc)
             conn.rollback()
+
+
+def create_processing_job(
+    *,
+    job_id: str,
+    job_type: str,
+    document_id: str,
+    file_hash: str,
+    filename: str,
+    content_type: str | None,
+    size_bytes: int,
+    stored_path: str,
+    created_at: datetime,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            raise RuntimeError("No DATABASE_URL configured, cannot create processing job.")
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                INSERT INTO processing_jobs (
+                    job_id, job_type, document_id, file_hash, filename, content_type,
+                    size_bytes, stored_path, status, metadata, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                ON CONFLICT (job_id) DO NOTHING;
+                """,
+                (
+                    job_id,
+                    job_type,
+                    document_id,
+                    file_hash,
+                    filename,
+                    content_type,
+                    size_bytes,
+                    stored_path,
+                    Json(metadata or {}),
+                    created_at,
+                ),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def get_processing_job(job_id: str) -> dict[str, Any] | None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            return None
+
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute(
+                "SELECT * FROM processing_jobs WHERE job_id = %s;",
+                (job_id,),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def mark_processing_job_running(job_id: str) -> None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            raise RuntimeError("No DATABASE_URL configured, cannot mark processing job.")
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'running',
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    error_type = NULL,
+                    error_message = NULL
+                WHERE job_id = %s;
+                """,
+                (job_id,),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def complete_processing_job(job_id: str, payload: dict[str, Any]) -> None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            raise RuntimeError("No DATABASE_URL configured, cannot complete processing job.")
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'succeeded',
+                    result_payload = %s,
+                    error_type = NULL,
+                    error_message = NULL,
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE job_id = %s;
+                """,
+                (Json(payload), job_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def fail_processing_job(job_id: str, *, error_type: str, error_message: str) -> None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            raise RuntimeError("No DATABASE_URL configured, cannot fail processing job.")
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE processing_jobs
+                SET status = 'failed',
+                    error_type = %s,
+                    error_message = %s,
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE job_id = %s;
+                """,
+                (error_type, error_message, job_id),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def get_latest_successful_job_by_hash(job_type: str, file_hash: str) -> dict[str, Any] | None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            return None
+
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        try:
+            cursor.execute(
+                """
+                SELECT *
+                FROM processing_jobs
+                WHERE job_type = %s
+                  AND file_hash = %s
+                  AND status = 'succeeded'
+                ORDER BY finished_at DESC NULLS LAST
+                LIMIT 1;
+                """,
+                (job_type, file_hash),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return dict(row) if row else None
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def now_utc() -> datetime:
+    return datetime.now(UTC)
 
 
 if __name__ == "__main__":

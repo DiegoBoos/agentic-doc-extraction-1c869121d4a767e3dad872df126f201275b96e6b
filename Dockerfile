@@ -38,16 +38,20 @@ COPY --from=builder /app/.venv /app/.venv
 # Copy application code
 COPY ./app ./app
 COPY README.md ./
+COPY docker-entrypoint.sh ./docker-entrypoint.sh
 
 # Set PATH to use venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1
+ENV APP_ROLE=api
 ENV WEB_CONCURRENCY=2
 ENV UVICORN_LIMIT_CONCURRENCY=16
 ENV UVICORN_TIMEOUT_KEEP_ALIVE=10
 
 # Create non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+RUN chmod +x /app/docker-entrypoint.sh \
+    && useradd -m -u 1000 appuser \
+    && chown -R appuser:appuser /app
 USER appuser
 
 # Expose port
@@ -57,5 +61,5 @@ EXPOSE 5090
 HEALTHCHECK --interval=30s --timeout=20s --start-period=45s --retries=5 \
     CMD curl -f http://localhost:5090/health || exit 1
 
-# Run the application with configurable worker/concurrency settings
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port 5090 --workers ${WEB_CONCURRENCY:-2} --limit-concurrency ${UVICORN_LIMIT_CONCURRENCY:-16} --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE:-10}"]
+# Run API or worker role with the same image
+CMD ["/app/docker-entrypoint.sh"]
