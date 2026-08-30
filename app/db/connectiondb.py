@@ -130,6 +130,18 @@ def ensure_billing_schema() -> None:
                 )
                 cursor.execute(
                     """
+                    ALTER TABLE billing_metadata
+                    ADD COLUMN IF NOT EXISTS file_hash VARCHAR(64);
+                    """
+                )
+                cursor.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_billing_metadata_file_hash
+                    ON billing_metadata (file_hash) WHERE file_hash IS NOT NULL;
+                    """
+                )
+                cursor.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS processing_jobs (
                         job_id VARCHAR(255) PRIMARY KEY,
                         job_type VARCHAR(64) NOT NULL,
@@ -248,6 +260,7 @@ def save_billing_metadata(
     processed_authorizations: int = 0,
     *,
     strict: bool = True,
+    file_hash: str | None = None,
 ) -> None:
     ensure_billing_schema()
     with get_connection() as conn:
@@ -261,37 +274,76 @@ def save_billing_metadata(
 
         cursor = conn.cursor()
         try:
-            cursor.execute(
-                """
-                INSERT INTO billing_metadata (
-                    document_id,
-                    filename,
-                    extracted_pages,
-                    azure_model_id,
-                    tokens_input,
-                    tokens_output,
-                    processed_authorizations
+            if file_hash:
+                # Deduplicate by file content: same file → update existing row
+                cursor.execute(
+                    """
+                    INSERT INTO billing_metadata (
+                        document_id,
+                        filename,
+                        extracted_pages,
+                        azure_model_id,
+                        tokens_input,
+                        tokens_output,
+                        processed_authorizations,
+                        file_hash
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (file_hash) WHERE file_hash IS NOT NULL
+                    DO UPDATE SET
+                        document_id = EXCLUDED.document_id,
+                        filename = EXCLUDED.filename,
+                        extracted_pages = EXCLUDED.extracted_pages,
+                        azure_model_id = EXCLUDED.azure_model_id,
+                        tokens_input = EXCLUDED.tokens_input,
+                        tokens_output = EXCLUDED.tokens_output,
+                        processed_authorizations = EXCLUDED.processed_authorizations,
+                        created_at = CURRENT_TIMESTAMP;
+                    """,
+                    (
+                        str(document_id),
+                        str(filename),
+                        extracted_pages,
+                        azure_model_id,
+                        tokens_input,
+                        tokens_output,
+                        processed_authorizations,
+                        file_hash,
+                    ),
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (document_id)
-                DO UPDATE SET
-                    filename = EXCLUDED.filename,
-                    extracted_pages = EXCLUDED.extracted_pages,
-                    azure_model_id = EXCLUDED.azure_model_id,
-                    tokens_input = EXCLUDED.tokens_input,
-                    tokens_output = EXCLUDED.tokens_output,
-                    processed_authorizations = EXCLUDED.processed_authorizations;
-                """,
-                (
-                    str(document_id),
-                    str(filename),
-                    extracted_pages,
-                    azure_model_id,
-                    tokens_input,
-                    tokens_output,
-                    processed_authorizations,
-                ),
-            )
+            else:
+                # Fallback: deduplicate by document_id
+                cursor.execute(
+                    """
+                    INSERT INTO billing_metadata (
+                        document_id,
+                        filename,
+                        extracted_pages,
+                        azure_model_id,
+                        tokens_input,
+                        tokens_output,
+                        processed_authorizations
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (document_id)
+                    DO UPDATE SET
+                        filename = EXCLUDED.filename,
+                        extracted_pages = EXCLUDED.extracted_pages,
+                        azure_model_id = EXCLUDED.azure_model_id,
+                        tokens_input = EXCLUDED.tokens_input,
+                        tokens_output = EXCLUDED.tokens_output,
+                        processed_authorizations = EXCLUDED.processed_authorizations;
+                    """,
+                    (
+                        str(document_id),
+                        str(filename),
+                        extracted_pages,
+                        azure_model_id,
+                        tokens_input,
+                        tokens_output,
+                        processed_authorizations,
+                    ),
+                )
             conn.commit()
         except Exception:
             conn.rollback()

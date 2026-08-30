@@ -55,6 +55,7 @@ async def run_parse_pipeline(
     extractor: OpenAIExtractorService,
     limiter: ProcessingLimiter | None,
     job_id: str | None = None,
+    file_hash: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
 
@@ -99,6 +100,7 @@ async def run_parse_pipeline(
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             processed_authorizations=processed_authorizations,
+            file_hash=file_hash or saved.file_hash,
         )
 
         payload = normalize_authorizations(extraction.model_dump())
@@ -126,6 +128,7 @@ async def run_patient_pipeline(
     extractor: OpenAIExtractorService,
     limiter: ProcessingLimiter | None,
     job_id: str | None = None,
+    file_hash: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
 
@@ -157,6 +160,7 @@ async def run_patient_pipeline(
             tokens_input=tokens_input,
             tokens_output=tokens_output,
             processed_authorizations=0,
+            file_hash=file_hash or saved.file_hash,
         )
 
         payload = PatientDataResponse(
@@ -205,6 +209,7 @@ async def persist_billing_metadata_with_retry(
     tokens_input: int,
     tokens_output: int,
     processed_authorizations: int,
+    file_hash: str | None = None,
 ) -> None:
     strict = _has_database_url()
     max_retries = max(1, settings.billing_max_retries)
@@ -232,6 +237,7 @@ async def persist_billing_metadata_with_retry(
                 tokens_output=tokens_output,
                 processed_authorizations=processed_authorizations,
                 strict=strict,
+                file_hash=file_hash,
             )
 
             if job_id is not None:
