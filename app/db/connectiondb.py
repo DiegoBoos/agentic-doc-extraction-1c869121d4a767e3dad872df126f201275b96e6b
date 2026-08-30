@@ -16,6 +16,12 @@ _schema_ready = False
 _schema_lock = threading.Lock()
 
 
+BILLING_STATUS_PENDING = "pending"
+BILLING_STATUS_SYNCING = "syncing"
+BILLING_STATUS_SUCCEEDED = "succeeded"
+BILLING_STATUS_FAILED = "failed"
+
+
 def _get_database_url() -> str | None:
     return os.getenv("DATABASE_URL") or os.getenv("DOC_EXTRACTION_DATABASE_URL")
 
@@ -118,6 +124,12 @@ def ensure_billing_schema() -> None:
                 )
                 cursor.execute(
                     """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_billing_metadata_document_id
+                    ON billing_metadata (document_id);
+                    """
+                )
+                cursor.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS processing_jobs (
                         job_id VARCHAR(255) PRIMARY KEY,
                         job_type VARCHAR(64) NOT NULL,
@@ -128,6 +140,10 @@ def ensure_billing_schema() -> None:
                         size_bytes BIGINT NOT NULL,
                         stored_path TEXT NOT NULL,
                         status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        billing_status VARCHAR(32) NOT NULL DEFAULT 'pending',
+                        billing_attempts INT NOT NULL DEFAULT 0,
+                        billing_error_message TEXT,
+                        billing_synced_at TIMESTAMPTZ,
                         result_payload JSONB,
                         error_type VARCHAR(64),
                         error_message TEXT,
@@ -136,6 +152,30 @@ def ensure_billing_schema() -> None:
                         started_at TIMESTAMPTZ,
                         finished_at TIMESTAMPTZ
                     );
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE processing_jobs
+                    ADD COLUMN IF NOT EXISTS billing_status VARCHAR(32) NOT NULL DEFAULT 'pending';
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE processing_jobs
+                    ADD COLUMN IF NOT EXISTS billing_attempts INT NOT NULL DEFAULT 0;
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE processing_jobs
+                    ADD COLUMN IF NOT EXISTS billing_error_message TEXT;
+                    """
+                )
+                cursor.execute(
+                    """
+                    ALTER TABLE processing_jobs
+                    ADD COLUMN IF NOT EXISTS billing_synced_at TIMESTAMPTZ;
                     """
                 )
                 cursor.execute(
@@ -206,21 +246,41 @@ def save_billing_metadata(
     tokens_input: int,
     tokens_output: int,
     processed_authorizations: int = 0,
+    *,
+    strict: bool = True,
 ) -> None:
     ensure_billing_schema()
     with get_connection() as conn:
         if conn is None:
+            if strict:
+                raise RuntimeError(
+                    "No DATABASE_URL configured, cannot persist billing metadata."
+                )
             print("No DATABASE_URL configured, skipping billing log.")
             return
 
+        cursor = conn.cursor()
         try:
-            cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO billing_metadata
-                (document_id, filename, extracted_pages, azure_model_id,
-                tokens_input, tokens_output, processed_authorizations)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
+                INSERT INTO billing_metadata (
+                    document_id,
+                    filename,
+                    extracted_pages,
+                    azure_model_id,
+                    tokens_input,
+                    tokens_output,
+                    processed_authorizations
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (document_id)
+                DO UPDATE SET
+                    filename = EXCLUDED.filename,
+                    extracted_pages = EXCLUDED.extracted_pages,
+                    azure_model_id = EXCLUDED.azure_model_id,
+                    tokens_input = EXCLUDED.tokens_input,
+                    tokens_output = EXCLUDED.tokens_output,
+                    processed_authorizations = EXCLUDED.processed_authorizations;
                 """,
                 (
                     str(document_id),
@@ -233,11 +293,11 @@ def save_billing_metadata(
                 ),
             )
             conn.commit()
-            cursor.close()
-            print(f"Facturación guardada para documento: {document_id}")
-        except Exception as exc:
-            print("Error al guardar metadata de facturación:", exc)
+        except Exception:
             conn.rollback()
+            raise
+        finally:
+            cursor.close()
 
 
 def create_processing_job(
@@ -263,9 +323,20 @@ def create_processing_job(
             cursor.execute(
                 """
                 INSERT INTO processing_jobs (
-                    job_id, job_type, document_id, file_hash, filename, content_type,
-                    size_bytes, stored_path, status, metadata, created_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s, %s)
+                    job_id,
+                    job_type,
+                    document_id,
+                    file_hash,
+                    filename,
+                    content_type,
+                    size_bytes,
+                    stored_path,
+                    status,
+                    billing_status,
+                    billing_attempts,
+                    metadata,
+                    created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s, 0, %s, %s)
                 ON CONFLICT (job_id) DO NOTHING;
                 """,
                 (
@@ -277,6 +348,7 @@ def create_processing_job(
                     content_type,
                     size_bytes,
                     stored_path,
+                    BILLING_STATUS_PENDING,
                     Json(metadata or {}),
                     created_at,
                 ),
@@ -329,6 +401,49 @@ def mark_processing_job_running(job_id: str) -> None:
                 WHERE job_id = %s;
                 """,
                 (job_id,),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            cursor.close()
+
+
+def update_processing_job_billing(
+    job_id: str,
+    *,
+    billing_status: str,
+    billing_attempts: int,
+    billing_error_message: str | None = None,
+) -> None:
+    ensure_billing_schema()
+    with get_connection() as conn:
+        if conn is None:
+            raise RuntimeError("No DATABASE_URL configured, cannot update billing status.")
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE processing_jobs
+                SET billing_status = %s,
+                    billing_attempts = %s,
+                    billing_error_message = %s,
+                    billing_synced_at = CASE
+                        WHEN %s = %s THEN CURRENT_TIMESTAMP
+                        ELSE billing_synced_at
+                    END
+                WHERE job_id = %s;
+                """,
+                (
+                    billing_status,
+                    billing_attempts,
+                    billing_error_message,
+                    billing_status,
+                    BILLING_STATUS_SUCCEEDED,
+                    job_id,
+                ),
             )
             conn.commit()
         except Exception:

@@ -37,6 +37,20 @@ class Settings(BaseSettings):
             "DOC_EXTRACTION_JOB_QUEUE_POLL_INTERVAL_MS",
         ),
     )
+    billing_max_retries: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "BILLING_MAX_RETRIES",
+            "DOC_EXTRACTION_BILLING_MAX_RETRIES",
+        ),
+    )
+    billing_retry_delay_ms: int = Field(
+        default=750,
+        validation_alias=AliasChoices(
+            "BILLING_RETRY_DELAY_MS",
+            "DOC_EXTRACTION_BILLING_RETRY_DELAY_MS",
+        ),
+    )
     redis_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices(

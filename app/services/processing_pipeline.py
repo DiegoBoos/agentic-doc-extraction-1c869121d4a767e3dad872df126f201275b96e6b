@@ -12,7 +12,13 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from app.core.config import Settings
-from app.db.connectiondb import save_billing_metadata
+from app.db.connectiondb import (
+    BILLING_STATUS_FAILED,
+    BILLING_STATUS_SUCCEEDED,
+    BILLING_STATUS_SYNCING,
+    save_billing_metadata,
+    update_processing_job_billing,
+)
 from app.schemas.patient import PatientDataResponse
 from app.services.document_parser import DocumentParserRouter
 from app.services.fhir_mapper import patient_data_to_fhir
@@ -25,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 JOB_TYPE_PARSE = "parse"
 JOB_TYPE_PATIENT = "extract_patient"
+
+
+class BillingPersistenceError(RuntimeError):
+    pass
 
 
 @asynccontextmanager
@@ -44,6 +54,7 @@ async def run_parse_pipeline(
     settings: Settings,
     extractor: OpenAIExtractorService,
     limiter: ProcessingLimiter | None,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
 
@@ -78,8 +89,9 @@ async def run_parse_pipeline(
         )
         processed_authorizations = count_processed_authorizations(extraction)
 
-        await asyncio.to_thread(
-            save_billing_metadata,
+        await persist_billing_metadata_with_retry(
+            settings=settings,
+            job_id=job_id,
             document_id=saved.id,
             filename=saved.filename,
             extracted_pages=extracted_pages,
@@ -113,6 +125,7 @@ async def run_patient_pipeline(
     settings: Settings,
     extractor: OpenAIExtractorService,
     limiter: ProcessingLimiter | None,
+    job_id: str | None = None,
 ) -> dict[str, Any]:
     started_at = time.perf_counter()
 
@@ -134,8 +147,9 @@ async def run_patient_pipeline(
         )
 
         extracted_pages = count_extracted_pages(parsed.json_output_path)
-        await asyncio.to_thread(
-            save_billing_metadata,
+        await persist_billing_metadata_with_retry(
+            settings=settings,
+            job_id=job_id,
             document_id=saved.id,
             filename=saved.filename,
             extracted_pages=extracted_pages,
@@ -172,6 +186,93 @@ async def run_patient_pipeline(
             elapsed_ms,
         )
         return payload
+
+
+def _has_database_url() -> bool:
+    import os
+
+    return bool(os.getenv("DATABASE_URL") or os.getenv("DOC_EXTRACTION_DATABASE_URL"))
+
+
+async def persist_billing_metadata_with_retry(
+    *,
+    settings: Settings,
+    job_id: str | None,
+    document_id: str,
+    filename: str,
+    extracted_pages: int,
+    azure_model_id: str,
+    tokens_input: int,
+    tokens_output: int,
+    processed_authorizations: int,
+) -> None:
+    strict = _has_database_url()
+    max_retries = max(1, settings.billing_max_retries)
+    retry_delay_seconds = max(0, settings.billing_retry_delay_ms) / 1000
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            if job_id is not None:
+                await asyncio.to_thread(
+                    update_processing_job_billing,
+                    job_id,
+                    billing_status=BILLING_STATUS_SYNCING,
+                    billing_attempts=attempt,
+                    billing_error_message=None,
+                )
+
+            await asyncio.to_thread(
+                save_billing_metadata,
+                document_id=document_id,
+                filename=filename,
+                extracted_pages=extracted_pages,
+                azure_model_id=azure_model_id,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                processed_authorizations=processed_authorizations,
+                strict=strict,
+            )
+
+            if job_id is not None:
+                await asyncio.to_thread(
+                    update_processing_job_billing,
+                    job_id,
+                    billing_status=BILLING_STATUS_SUCCEEDED,
+                    billing_attempts=attempt,
+                    billing_error_message=None,
+                )
+            return
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "Billing persistence failed | document_id=%s attempt=%s/%s error=%s",
+                document_id,
+                attempt,
+                max_retries,
+                exc,
+            )
+            if job_id is not None:
+                await asyncio.to_thread(
+                    update_processing_job_billing,
+                    job_id,
+                    billing_status=BILLING_STATUS_FAILED,
+                    billing_attempts=attempt,
+                    billing_error_message=str(exc),
+                )
+            if attempt < max_retries and retry_delay_seconds > 0:
+                await asyncio.sleep(retry_delay_seconds)
+
+    if strict:
+        raise BillingPersistenceError(
+            "No fue posible guardar la facturación del documento tras "
+            f"{max_retries} intento(s): {last_error}"
+        )
+    logger.error(
+        "Billing persistence exhausted retries (non-strict) | document_id=%s error=%s",
+        document_id,
+        last_error,
+    )
 
 
 def cleanup_processing_artifacts(saved: SavedUpload, settings: Settings) -> None:
@@ -253,6 +354,12 @@ def map_processing_exception(exc: Exception) -> tuple[int, str, str]:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "llm_unavailable",
             "Servicio de extracción LLM no disponible. Intente de nuevo más tarde.",
+        )
+    if isinstance(exc, BillingPersistenceError):
+        return (
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "billing_persistence_error",
+            "No fue posible guardar la facturación del documento.",
         )
     if isinstance(exc, ValueError):
         return status.HTTP_400_BAD_REQUEST, "validation_error", str(exc)
