@@ -93,6 +93,13 @@ class Settings(BaseSettings):
             "DOC_EXTRACTION_APP_ROLE",
         ),
     )
+    max_upload_pages: int = Field(
+        default=20,
+        validation_alias=AliasChoices(
+            "MAX_UPLOAD_PAGES",
+            "DOC_EXTRACTION_MAX_UPLOAD_PAGES",
+        ),
+    )
     processing_max_concurrent_documents: int = Field(
         default=2,
         validation_alias=AliasChoices(

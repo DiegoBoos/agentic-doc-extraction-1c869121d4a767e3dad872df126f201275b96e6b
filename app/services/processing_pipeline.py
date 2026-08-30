@@ -27,6 +27,32 @@ from app.services.openai_extractor import LLMConnectionError, OpenAIExtractorSer
 from app.services.processing_limiter import ProcessingLimiter
 from app.services.utils import normalize_nit
 
+
+class DocumentTooManyPagesError(ValueError):
+    """Raised when a PDF exceeds the maximum allowed page count."""
+
+    def __init__(self, *, pages: int, max_pages: int, filename: str) -> None:
+        super().__init__(
+            f"El documento '{filename}' tiene {pages} páginas y excede el "
+            f"máximo permitido de {max_pages}."
+        )
+        self.pages = pages
+        self.max_pages = max_pages
+
+
+def _count_pdf_pages(file_path: Path) -> int | None:
+    """Count pages in a PDF using pypdf.  Returns None for non-PDF files."""
+    if file_path.suffix.lower() != ".pdf":
+        return None
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(file_path))
+        return len(reader.pages)
+    except Exception:
+        logger.warning("Could not count pages for %s", file_path)
+        return None
+
 logger = logging.getLogger(__name__)
 
 JOB_TYPE_PARSE = "parse"
@@ -67,6 +93,22 @@ async def run_parse_pipeline(
             saved.size_bytes,
             f"{slot.wait_ms:.2f}" if slot else "0.00",
         )
+
+        # --- Page-count gate: reject before calling Azure/LLM ---
+        max_pages = settings.max_upload_pages
+        if max_pages > 0:
+            page_count = await asyncio.to_thread(_count_pdf_pages, Path(saved.stored_path))
+            if page_count is not None and page_count > max_pages:
+                logger.warning(
+                    "Document rejected (too many pages) | document_id=%s file=%s pages=%s max=%s",
+                    saved.id,
+                    saved.filename,
+                    page_count,
+                    max_pages,
+                )
+                raise DocumentTooManyPagesError(
+                    pages=page_count, max_pages=max_pages, filename=saved.filename
+                )
 
         parsed = await asyncio.to_thread(
             parser.parse_document,
@@ -139,6 +181,22 @@ async def run_patient_pipeline(
             saved.filename,
             f"{slot.wait_ms:.2f}" if slot else "0.00",
         )
+
+        # --- Page-count gate: reject before calling Azure/LLM ---
+        max_pages = settings.max_upload_pages
+        if max_pages > 0:
+            page_count = await asyncio.to_thread(_count_pdf_pages, Path(saved.stored_path))
+            if page_count is not None and page_count > max_pages:
+                logger.warning(
+                    "Document rejected (too many pages) | document_id=%s file=%s pages=%s max=%s",
+                    saved.id,
+                    saved.filename,
+                    page_count,
+                    max_pages,
+                )
+                raise DocumentTooManyPagesError(
+                    pages=page_count, max_pages=max_pages, filename=saved.filename
+                )
 
         parsed = await asyncio.to_thread(
             parser.parse_first_page,
@@ -355,6 +413,12 @@ def normalize_authorizations(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def map_processing_exception(exc: Exception) -> tuple[int, str, str]:
+    if isinstance(exc, DocumentTooManyPagesError):
+        return (
+            status.HTTP_400_BAD_REQUEST,
+            "document_too_large",
+            str(exc),
+        )
     if isinstance(exc, LLMConnectionError):
         return (
             status.HTTP_503_SERVICE_UNAVAILABLE,
