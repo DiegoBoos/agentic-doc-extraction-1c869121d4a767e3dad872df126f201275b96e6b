@@ -111,12 +111,27 @@ async def run_parse_pipeline(
                     pages=page_count, max_pages=max_pages, filename=saved.filename
                 )
 
+        ocr_started_at = time.perf_counter()
+        logger.info(
+            "Starting parse OCR stage | document_id=%s file=%s provider=%s",
+            saved.id,
+            saved.filename,
+            settings.ocr_provider,
+        )
         parsed = await asyncio.to_thread(
             parser.parse_document,
             document_path=Path(saved.stored_path),
             document_id=saved.id,
         )
         extracted_pages = count_extracted_pages(parsed.json_output_path)
+        logger.info(
+            "Completed parse OCR stage | document_id=%s file=%s provider=%s pages=%s elapsed_ms=%.2f",
+            saved.id,
+            saved.filename,
+            parsed.provider,
+            extracted_pages,
+            (time.perf_counter() - ocr_started_at) * 1000,
+        )
 
         if extracted_pages >= settings.processing_large_document_page_threshold:
             logger.warning(
@@ -127,11 +142,29 @@ async def run_parse_pipeline(
                 settings.processing_large_document_page_threshold,
             )
 
+        llm_started_at = time.perf_counter()
+        logger.info(
+            "Starting parse LLM stage | document_id=%s file=%s provider=%s markdown_chars=%s chunks=%s",
+            saved.id,
+            saved.filename,
+            extractor.model,
+            len(parsed.markdown),
+            len(parsed.chunks),
+        )
         extraction, tokens_input, tokens_output = await extractor.extract_authorization(
             parsed.markdown,
             parsed.chunks,
         )
         processed_authorizations = count_processed_authorizations(extraction)
+        logger.info(
+            "Completed parse LLM stage | document_id=%s file=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            saved.id,
+            saved.filename,
+            processed_authorizations,
+            tokens_input,
+            tokens_output,
+            (time.perf_counter() - llm_started_at) * 1000,
+        )
 
         await persist_billing_metadata_with_retry(
             settings=settings,
@@ -202,13 +235,42 @@ async def run_patient_pipeline(
                     pages=page_count, max_pages=max_pages, filename=saved.filename
                 )
 
+        ocr_started_at = time.perf_counter()
+        logger.info(
+            "Starting patient OCR stage | document_id=%s file=%s provider=azure:first_page",
+            saved.id,
+            saved.filename,
+        )
         parsed = await asyncio.to_thread(
             parser.parse_first_page,
             document_path=Path(saved.stored_path),
             document_id=saved.id,
         )
+        logger.info(
+            "Completed patient OCR stage | document_id=%s file=%s provider=%s elapsed_ms=%.2f",
+            saved.id,
+            saved.filename,
+            parsed.provider,
+            (time.perf_counter() - ocr_started_at) * 1000,
+        )
+        llm_started_at = time.perf_counter()
+        logger.info(
+            "Starting patient LLM stage | document_id=%s file=%s provider=%s markdown_chars=%s",
+            saved.id,
+            saved.filename,
+            extractor.model,
+            len(parsed.markdown),
+        )
         extraction, tokens_input, tokens_output = await extractor.extract_patient_data(
             parsed.markdown
+        )
+        logger.info(
+            "Completed patient LLM stage | document_id=%s file=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            saved.id,
+            saved.filename,
+            tokens_input,
+            tokens_output,
+            (time.perf_counter() - llm_started_at) * 1000,
         )
 
         extracted_pages = count_extracted_pages(parsed.json_output_path)

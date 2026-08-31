@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -36,10 +37,18 @@ class JobCoordinator:
         self.queue = queue
 
     async def submit(self, *, job_type: str, saved: SavedUpload) -> str:
+        started_at = time.perf_counter()
         metadata = {
             "filename": saved.filename,
             "content_type": saved.content_type,
         }
+        logger.info(
+            "Creating processing job | job_id=%s job_type=%s filename=%s size_bytes=%s",
+            saved.id,
+            job_type,
+            saved.filename,
+            saved.size_bytes,
+        )
         await asyncio.to_thread(
             create_processing_job,
             job_id=saved.id,
@@ -54,14 +63,26 @@ class JobCoordinator:
             metadata=metadata,
         )
         await self.queue.enqueue(saved.id)
+        logger.info(
+            "Queued processing job | job_id=%s job_type=%s elapsed_ms=%.2f",
+            saved.id,
+            job_type,
+            (time.perf_counter() - started_at) * 1000,
+        )
         return saved.id
 
     async def wait_for_result(self, job_id: str) -> dict[str, Any]:
         timeout_seconds = max(1, self.settings.job_queue_wait_timeout_seconds)
         poll_interval_seconds = max(0.1, self.settings.job_queue_poll_interval_ms / 1000)
-        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        deadline = started_at + timeout_seconds
+        next_progress_log = started_at + 15
+        poll_count = 0
+        last_status: str | None = None
 
         while True:
+            poll_count += 1
             job = await asyncio.to_thread(get_processing_job, job_id)
             if job is None:
                 raise HTTPException(
@@ -70,9 +91,34 @@ class JobCoordinator:
                 )
 
             status_value = job.get("status")
+            elapsed_seconds = loop.time() - started_at
+            if status_value != last_status:
+                logger.info(
+                    "Processing job status changed | job_id=%s status=%s elapsed_s=%.2f",
+                    job_id,
+                    status_value,
+                    elapsed_seconds,
+                )
+                last_status = status_value
+            elif loop.time() >= next_progress_log:
+                logger.info(
+                    "Still waiting for processing job | job_id=%s status=%s elapsed_s=%.2f polls=%s",
+                    job_id,
+                    status_value,
+                    elapsed_seconds,
+                    poll_count,
+                )
+                next_progress_log = loop.time() + 15
+
             if status_value == "succeeded":
                 payload = job.get("result_payload")
                 if isinstance(payload, dict):
+                    logger.info(
+                        "Processing job succeeded | job_id=%s elapsed_s=%.2f polls=%s",
+                        job_id,
+                        elapsed_seconds,
+                        poll_count,
+                    )
                     return payload
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -80,9 +126,21 @@ class JobCoordinator:
                 )
 
             if status_value == "failed":
+                logger.warning(
+                    "Processing job failed while waiting | job_id=%s error_type=%s elapsed_s=%.2f",
+                    job_id,
+                    job.get("error_type"),
+                    elapsed_seconds,
+                )
                 raise self._build_failed_job_exception(job)
 
-            if asyncio.get_running_loop().time() >= deadline:
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Processing job wait timed out | job_id=%s elapsed_s=%.2f polls=%s",
+                    job_id,
+                    elapsed_seconds,
+                    poll_count,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                     detail=(
@@ -122,13 +180,22 @@ def saved_upload_from_job(job: dict[str, Any]) -> SavedUpload:
 
 
 async def process_job(runtime: RuntimeServices, job_id: str) -> None:
+    started_at = time.perf_counter()
     job = await asyncio.to_thread(get_processing_job, job_id)
     if job is None:
         logger.warning("Processing job %s not found", job_id)
         return
 
     saved = saved_upload_from_job(job)
+    logger.info(
+        "Worker picked up job | job_id=%s job_type=%s filename=%s size_bytes=%s",
+        job_id,
+        job.get("job_type"),
+        saved.filename,
+        saved.size_bytes,
+    )
     await asyncio.to_thread(mark_processing_job_running, job_id)
+    logger.info("Marked job as running | job_id=%s", job_id)
 
     try:
         if job["job_type"] == JOB_TYPE_PARSE:
@@ -151,6 +218,12 @@ async def process_job(runtime: RuntimeServices, job_id: str) -> None:
             raise ValueError(f"Unsupported job type: {job['job_type']}")
 
         await asyncio.to_thread(complete_processing_job, job_id, payload)
+        logger.info(
+            "Worker completed job | job_id=%s job_type=%s elapsed_ms=%.2f",
+            job_id,
+            job.get("job_type"),
+            (time.perf_counter() - started_at) * 1000,
+        )
     except Exception as exc:
         _, error_type, error_message = map_processing_exception(exc)
         await asyncio.to_thread(
@@ -159,9 +232,14 @@ async def process_job(runtime: RuntimeServices, job_id: str) -> None:
             error_type=error_type,
             error_message=error_message,
         )
-        logger.exception("Processing job failed | job_id=%s", job_id)
+        logger.exception(
+            "Processing job failed | job_id=%s elapsed_ms=%.2f",
+            job_id,
+            (time.perf_counter() - started_at) * 1000,
+        )
     finally:
         await asyncio.to_thread(cleanup_processing_artifacts, saved, runtime.settings)
+        logger.info("Cleaned up job artifacts | job_id=%s", job_id)
 
 
 async def run_direct_parse(

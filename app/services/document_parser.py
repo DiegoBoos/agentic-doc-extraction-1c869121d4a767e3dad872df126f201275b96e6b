@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -27,6 +29,8 @@ try:
 except ImportError:  # pragma: no cover - dependency optional at import time
     PdfReader = None  # type: ignore[assignment]
     PdfWriter = None  # type: ignore[assignment]
+
+logger = logging.getLogger(__name__)
 
 ParserProvider = Literal["azure", "google_vision"]
 
@@ -103,6 +107,7 @@ class AzureDocumentIntelligenceParser(BaseDocumentParser):
         first_page_only: bool = False,
         output_name_suffix: str = "",
     ) -> ParsedDocumentResult:
+        started_at = time.perf_counter()
         output_dir = self.output_root / document_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -114,6 +119,15 @@ class AzureDocumentIntelligenceParser(BaseDocumentParser):
         if pages:
             analyze_kwargs["pages"] = pages
 
+        logger.info(
+            "Starting Azure OCR | document_id=%s file=%s bytes=%s pages=%s first_page_only=%s model=%s",
+            document_id,
+            document_path.name,
+            len(file_bytes),
+            pages or "all",
+            first_page_only,
+            self.model,
+        )
         poller = self.client.begin_analyze_document(
             self.model,
             AnalyzeDocumentRequest(bytes_source=file_bytes),
@@ -132,9 +146,20 @@ class AzureDocumentIntelligenceParser(BaseDocumentParser):
             json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+        chunks = self._extract_chunks(result)
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Completed Azure OCR | document_id=%s file=%s markdown_chars=%s chunks=%s elapsed_ms=%.2f",
+            document_id,
+            document_path.name,
+            len(markdown),
+            len(chunks),
+            elapsed_ms,
+        )
+
         return ParsedDocumentResult(
             markdown=markdown,
-            chunks=self._extract_chunks(result),
+            chunks=chunks,
             json_output_path=str(raw_json_path),
             markdown_output_path=str(markdown_output_path),
             model=self.model,
@@ -216,11 +241,20 @@ class GoogleCloudVisionParser(BaseDocumentParser):
             self.client = google_vision.ImageAnnotatorClient()
 
     def parse_document(self, *, document_path: Path, document_id: str) -> ParsedDocumentResult:
+        started_at = time.perf_counter()
         output_dir = self.output_root / document_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         file_bytes = document_path.read_bytes()
         suffix = document_path.suffix.lower()
+
+        logger.info(
+            "Starting Google Vision OCR | document_id=%s file=%s bytes=%s kind=%s",
+            document_id,
+            document_path.name,
+            len(file_bytes),
+            suffix or "unknown",
+        )
 
         if suffix == ".pdf":
             full_text, chunks, raw_payload = self._process_pdf(file_bytes)
@@ -233,6 +267,16 @@ class GoogleCloudVisionParser(BaseDocumentParser):
         raw_json_path = output_dir / f"{document_path.stem}.google_vision_output.json"
         raw_json_path.write_text(
             json.dumps(raw_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Completed Google Vision OCR | document_id=%s file=%s markdown_chars=%s chunks=%s elapsed_ms=%.2f",
+            document_id,
+            document_path.name,
+            len(full_text),
+            len(chunks),
+            elapsed_ms,
         )
 
         return ParsedDocumentResult(
@@ -326,7 +370,14 @@ class DocumentParserRouter:
         document_id: str,
         provider: ParserProvider | None = None,
     ) -> ParsedDocumentResult:
-        parser = self._select_parser(provider or self.default_provider)
+        selected_provider = provider or self.default_provider
+        logger.info(
+            "Routing document OCR | document_id=%s provider=%s file=%s",
+            document_id,
+            selected_provider,
+            document_path.name,
+        )
+        parser = self._select_parser(selected_provider)
         return parser.parse_document(document_path=document_path, document_id=document_id)
 
     def parse_first_page(
@@ -335,6 +386,11 @@ class DocumentParserRouter:
         document_path: Path,
         document_id: str,
     ) -> ParsedDocumentResult:
+        logger.info(
+            "Routing first-page OCR | document_id=%s provider=azure file=%s",
+            document_id,
+            document_path.name,
+        )
         parser = self._select_parser("azure")
         return parser.parse_first_page(document_path=document_path, document_id=document_id)
 

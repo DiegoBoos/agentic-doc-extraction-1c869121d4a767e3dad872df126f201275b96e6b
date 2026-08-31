@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, TypeVar
 
 import httpx
@@ -136,6 +137,7 @@ class OpenAIExtractorService:
         markdown: str,
         document_chunks: list[dict[str, Any]] | None = None,
     ) -> tuple[AuthorizationResponse, int, int]:
+        started_at = time.perf_counter()
         text_chunks = build_authorization_chunks(
             markdown=markdown,
             chunks=document_chunks,
@@ -146,11 +148,26 @@ class OpenAIExtractorService:
         )
 
         if len(text_chunks) == 1:
+            logger.info(
+                "Starting single-pass authorization extraction | model=%s markdown_chars=%s estimated_tokens=%s",
+                self.model,
+                len(markdown),
+                text_chunks[0].estimated_tokens,
+            )
             try:
-                return await self._extract_authorization_from_text(
+                result, tokens_input, tokens_output = await self._extract_authorization_from_text(
                     text_chunks[0],
                     is_fragment=False,
                 )
+                logger.info(
+                    "Completed single-pass authorization extraction | model=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+                    self.model,
+                    len(result.authorizations),
+                    tokens_input,
+                    tokens_output,
+                    (time.perf_counter() - started_at) * 1000,
+                )
+                return result, tokens_input, tokens_output
             except ContextWindowExceededError:
                 logger.warning(
                     "Context window exceeded on single-pass extraction; "
@@ -170,12 +187,14 @@ class OpenAIExtractorService:
         total_output_tokens = 0
 
         logger.info(
-            "Chunked authorization extraction | chunks=%s model=%s",
+            "Starting chunked authorization extraction | chunks=%s model=%s markdown_chars=%s",
             len(text_chunks),
             self.model,
+            len(markdown),
         )
 
         for index, chunk in enumerate(text_chunks, start=1):
+            chunk_started_at = time.perf_counter()
             logger.info(
                 "Processing authorization chunk %s/%s | scope=%s estimated_tokens=%s",
                 index,
@@ -189,12 +208,31 @@ class OpenAIExtractorService:
                     is_fragment=True,
                 )
             )
+            logger.info(
+                "Completed authorization chunk %s/%s | scope=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+                index,
+                len(text_chunks),
+                chunk.label,
+                len(result.authorizations),
+                chunk_input_tokens,
+                chunk_output_tokens,
+                (time.perf_counter() - chunk_started_at) * 1000,
+            )
             merged.extend(result.authorizations)
             total_input_tokens += chunk_input_tokens
             total_output_tokens += chunk_output_tokens
 
+        merged_response = AuthorizationResponse(authorizations=merged)
+        logger.info(
+            "Completed chunked authorization extraction | chunks=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            len(text_chunks),
+            len(merged_response.authorizations),
+            total_input_tokens,
+            total_output_tokens,
+            (time.perf_counter() - started_at) * 1000,
+        )
         return (
-            AuthorizationResponse(authorizations=merged),
+            merged_response,
             total_input_tokens,
             total_output_tokens,
         )
@@ -202,16 +240,30 @@ class OpenAIExtractorService:
     async def extract_patient_data(
         self, markdown: str
     ) -> tuple[PatientExtractionResponse, int, int]:
+        started_at = time.perf_counter()
+        logger.info(
+            "Starting patient extraction | model=%s markdown_chars=%s",
+            self.model,
+            len(markdown),
+        )
         user_content = (
             "Extrae los datos demográficos del paciente desde el siguiente markdown de la "
             "primera página y responde en el esquema estructurado.\n\n"
             f"{markdown}"
         )
-        return await self._extract_structured(
+        result, tokens_input, tokens_output = await self._extract_structured(
             system_prompt=PATIENT_SYSTEM_PROMPT,
             user_content=user_content,
             response_model=PatientExtractionResponse,
         )
+        logger.info(
+            "Completed patient extraction | model=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            self.model,
+            tokens_input,
+            tokens_output,
+            (time.perf_counter() - started_at) * 1000,
+        )
+        return result, tokens_input, tokens_output
 
     async def _extract_authorization_from_text(
         self,
@@ -270,6 +322,13 @@ class OpenAIExtractorService:
         user_content: str,
         response_model: type[StructuredResponseT],
     ) -> tuple[StructuredResponseT, int, int]:
+        started_at = time.perf_counter()
+        logger.info(
+            "Calling LLM | model=%s response_model=%s input_chars=%s",
+            model,
+            response_model.__name__,
+            len(user_content),
+        )
         try:
             response = await client.responses.parse(
                 model=model,
@@ -301,6 +360,14 @@ class OpenAIExtractorService:
                 tokens_input = total_tokens
                 tokens_output = 0
 
+        logger.info(
+            "LLM response parsed | model=%s response_model=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            model,
+            response_model.__name__,
+            tokens_input,
+            tokens_output,
+            (time.perf_counter() - started_at) * 1000,
+        )
         return response.output_parsed, tokens_input, tokens_output
 
     @staticmethod

@@ -45,8 +45,20 @@ async def run_worker() -> None:
             if job_id is None:
                 continue
 
+            logger.info(
+                "Dequeued job | job_id=%s in_flight=%s/%s",
+                job_id,
+                len(in_flight),
+                max_in_flight,
+            )
             task = asyncio.create_task(process_job(runtime, job_id))
             in_flight.add(task)
+            logger.info(
+                "Dispatched job to worker task | job_id=%s in_flight=%s/%s",
+                job_id,
+                len(in_flight),
+                max_in_flight,
+            )
             task.add_done_callback(in_flight.discard)
     finally:
         if runtime.job_queue is not None:

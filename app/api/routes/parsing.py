@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -26,6 +27,8 @@ from app.services.processing_pipeline import (
     cleanup_processing_artifacts,
 )
 from app.services.runtime import RuntimeServices
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/parse", tags=["parse"])
 
@@ -53,6 +56,13 @@ async def parse_document(
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
 
+    logger.info(
+        "Parse request received | filename=%s content_type=%s queue_enabled=%s",
+        file.filename,
+        file.content_type,
+        coordinator is not None,
+    )
+
     try:
         saved = await save_upload(
             file=file,
@@ -69,6 +79,14 @@ async def parse_document(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    logger.info(
+        "Upload persisted | document_id=%s filename=%s size_bytes=%s stored_path=%s",
+        saved.id,
+        saved.filename,
+        saved.size_bytes,
+        saved.stored_path,
+    )
+
     # --- Page-count gate: reject before Azure/LLM ---
     from pathlib import Path
 
@@ -76,6 +94,13 @@ async def parse_document(
     if max_pages > 0:
         page_count = _count_pdf_pages(Path(saved.stored_path))
         if page_count is not None and page_count > max_pages:
+            logger.warning(
+                "Parse request rejected by page gate | document_id=%s filename=%s pages=%s max=%s",
+                saved.id,
+                saved.filename,
+                page_count,
+                max_pages,
+            )
             await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -95,11 +120,27 @@ async def parse_document(
 
     if coordinator is not None:
         try:
+            logger.info(
+                "Submitting parse job to queue | document_id=%s filename=%s",
+                saved.id,
+                saved.filename,
+            )
             await coordinator.submit(job_type=JOB_TYPE_PARSE, saved=saved)
         except Exception:
             await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
             raise
+        logger.info(
+            "Waiting synchronously for queued parse job | document_id=%s timeout_seconds=%s",
+            saved.id,
+            settings.job_queue_wait_timeout_seconds,
+        )
         return await coordinator.wait_for_result(saved.id)
+
+    logger.info(
+        "Running parse request in direct mode | document_id=%s filename=%s",
+        saved.id,
+        saved.filename,
+    )
 
     runtime = RuntimeServices(
         settings=settings,
