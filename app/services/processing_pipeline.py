@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import time
 from contextlib import asynccontextmanager
@@ -145,7 +146,10 @@ async def run_parse_pipeline(
             file_hash=file_hash or saved.file_hash,
         )
 
-        payload = normalize_authorizations(extraction.model_dump())
+        payload = normalize_authorizations(
+            extraction.model_dump(),
+            markdown=parsed.markdown,
+        )
 
         elapsed_ms = (time.perf_counter() - started_at) * 1000
         logger.info(
@@ -371,9 +375,121 @@ def count_processed_authorizations(extraction: Any) -> int:
     return 0
 
 
-def normalize_authorizations(data: dict[str, Any]) -> dict[str, Any]:
+_LOCATION_CANONICAL = {
+    "ambulatorio": "Ambulatorio",
+    "hospitalario": "Hospitalario",
+    "urgencias": "Urgencias",
+    "domiciliario": "Domiciliario",
+}
+
+_GROUP_CANONICAL = {
+    "consulta externa": "Consulta externa",
+    "hospitalización": "Hospitalización",
+    "hospitalizacion": "Hospitalización",
+    "cirugía": "Cirugía",
+    "cirugia": "Cirugía",
+    "apoyo diagnóstico": "Apoyo diagnóstico",
+    "apoyo diagnostico": "Apoyo diagnóstico",
+}
+
+
+def _normalize_date_text(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    match = re.fullmatch(r"(\d{4})[-/](\d{2})[-/](\d{2})", text)
+    if match:
+        return f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+    match = re.fullmatch(r"(\d{2})[-/](\d{2})[-/](\d{4})", text)
+    if match:
+        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+    return text
+
+
+def _extract_document_vigencia(markdown: str | None) -> str | None:
+    if not markdown:
+        return None
+    patterns = [
+        r"vigencia[^\n:]{0,40}[:\-]?\s*(\d{1,3})\s*d[ií]as?",
+        r"(\d{1,3})\s*d[ií]as?\s+de\s+vigencia",
+        r"vigencia[^\n]{0,80}?(\d{1,3})\s*d[ií]as?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, markdown, flags=re.IGNORECASE)
+        if match:
+            return f"{match.group(1)} dias"
+    return None
+
+
+def _normalize_vigencia_value(value: Any, *, document_vigencia: str | None = None) -> Any:
+    if document_vigencia:
+        return document_vigencia
+    if not isinstance(value, str):
+        return value
+    text = " ".join(value.strip().split())
+    match = re.search(r"(\d{1,3})\s*d[ií]as?", text, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group(1)} dias"
+    return text or None
+
+
+def _canonical_location(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.strip().split())
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"no especificada", "no especificado", "n/a", "na", "null"}:
+        return None
+    if lowered in _GROUP_CANONICAL:
+        return None
+    return _LOCATION_CANONICAL.get(lowered)
+
+
+def _canonical_group(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.strip().split())
+    if not text:
+        return None
+    for token in re.split(r"[;|,/]", text):
+        lowered = token.strip().lower()
+        if lowered in _GROUP_CANONICAL:
+            return _GROUP_CANONICAL[lowered]
+    if text.lower() in _LOCATION_CANONICAL:
+        return None
+    return None
+
+
+def _extract_document_location(markdown: str | None) -> str | None:
+    if not markdown:
+        return None
+    lowered = markdown.lower()
+    for key, canonical in _LOCATION_CANONICAL.items():
+        if re.search(rf"\b{re.escape(key)}\b", lowered):
+            return canonical
+    return None
+
+
+def _extract_document_group(markdown: str | None) -> str | None:
+    if not markdown:
+        return None
+    lowered = markdown.lower()
+    for key, canonical in _GROUP_CANONICAL.items():
+        if re.search(rf"\b{re.escape(key)}\b", lowered):
+            return canonical
+    return None
+
+
+def normalize_authorizations(
+    data: dict[str, Any], *, markdown: str | None = None
+) -> dict[str, Any]:
     try:
         auth_list = data.get("authorizations") if "authorizations" in data else [data]
+        document_vigencia = _extract_document_vigencia(markdown)
+        document_location = _extract_document_location(markdown)
+        document_group = _extract_document_group(markdown)
 
         for auth_item in auth_list:
             prestador = auth_item.get("prestador_autorizado") or {}
@@ -387,6 +503,29 @@ def normalize_authorizations(data: dict[str, Any]) -> dict[str, Any]:
                 datos_paciente["numero_identificacion"] = normalize_nit(
                     datos_paciente.get("numero_identificacion")
                 )
+
+            auth_item["fecha_autorizacion"] = _normalize_date_text(
+                auth_item.get("fecha_autorizacion")
+            )
+            auth_item["vigencia"] = _normalize_vigencia_value(
+                auth_item.get("vigencia"),
+                document_vigencia=document_vigencia,
+            )
+
+            servicios = auth_item.get("servicios_autorizados") or {}
+            grupo = _canonical_group(servicios.get("grupo_servicio"))
+            ubicacion = _canonical_location(servicios.get("ubicacion_paciente"))
+
+            if ubicacion is None and grupo is None:
+                grupo = document_group
+                ubicacion = document_location
+            else:
+                grupo = grupo or document_group
+                ubicacion = ubicacion or document_location
+
+            servicios["grupo_servicio"] = grupo
+            servicios["ubicacion_paciente"] = ubicacion
+            auth_item["servicios_autorizados"] = servicios
 
         filtered = [
             auth_item
