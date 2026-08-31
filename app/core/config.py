@@ -37,6 +37,13 @@ class Settings(BaseSettings):
             "DOC_EXTRACTION_JOB_QUEUE_POLL_INTERVAL_MS",
         ),
     )
+    job_queue_response_mode: str = Field(
+        default="sync",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_RESPONSE_MODE",
+            "DOC_EXTRACTION_JOB_QUEUE_RESPONSE_MODE",
+        ),
+    )
     billing_max_retries: int = Field(
         default=3,
         validation_alias=AliasChoices(
@@ -240,6 +247,10 @@ class Settings(BaseSettings):
     @property
     def queue_enabled(self) -> bool:
         return self.job_queue_mode.lower() == "redis"
+
+    @property
+    def queue_async_response_enabled(self) -> bool:
+        return self.job_queue_response_mode.strip().lower() in {"async", "accepted", "queued"}
 
     model_config = SettingsConfigDict(
         env_file=".env",

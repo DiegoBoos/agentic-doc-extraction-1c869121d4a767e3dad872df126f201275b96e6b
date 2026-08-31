@@ -31,6 +31,37 @@ from app.services.runtime import RuntimeServices
 logger = logging.getLogger(__name__)
 
 
+def serialize_processing_job(job: dict[str, Any]) -> dict[str, Any]:
+    raw_status = str(job.get("status") or "").strip().lower()
+    normalized_status = {
+        "queued": "queued",
+        "running": "running",
+        "succeeded": "completed",
+        "failed": "failed",
+    }.get(raw_status, raw_status or "unknown")
+
+    payload: dict[str, Any] = {
+        "job_id": job.get("job_id"),
+        "document_id": job.get("document_id"),
+        "job_type": job.get("job_type"),
+        "status": normalized_status,
+        "created_at": job.get("created_at"),
+        "started_at": job.get("started_at"),
+        "finished_at": job.get("finished_at"),
+        "filename": job.get("filename"),
+        "content_type": job.get("content_type"),
+        "size_bytes": job.get("size_bytes"),
+    }
+
+    if normalized_status == "completed":
+        payload["result"] = job.get("result_payload") or {}
+    elif normalized_status == "failed":
+        payload["error_type"] = job.get("error_type")
+        payload["error"] = job.get("error_message") or "Processing job failed."
+
+    return payload
+
+
 class JobCoordinator:
     def __init__(self, *, settings: Settings, queue: RedisJobQueue) -> None:
         self.settings = settings

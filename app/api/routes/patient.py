@@ -17,7 +17,12 @@ from app.dependencies.services import (
 )
 from app.services.document_parser import DocumentParserRouter
 from app.services.file_ingest import FileTooLargeError, save_upload
-from app.services.job_orchestrator import JobCoordinator, run_direct_patient
+from app.db.connectiondb import get_processing_job
+from app.services.job_orchestrator import (
+    JobCoordinator,
+    run_direct_patient,
+    serialize_processing_job,
+)
 from app.services.openai_extractor import OpenAIExtractorService
 from app.services.processing_limiter import ProcessingLimiter
 from app.services.processing_pipeline import (
@@ -35,6 +40,20 @@ LimiterDep = Annotated[ProcessingLimiter, Depends(get_processing_limiter)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 UploadFileDep = Annotated[UploadFile, File(...)]
 JobCoordinatorDep = Annotated[JobCoordinator | None, Depends(get_job_coordinator)]
+
+
+@router.get("/{job_id}")
+async def get_patient_job_status(
+    job_id: str,
+    _auth: None = Depends(require_api_key),
+):
+    job = await asyncio.to_thread(get_processing_job, job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Processing job not found: {job_id}",
+        )
+    return serialize_processing_job(job)
 
 
 @router.post(
@@ -99,6 +118,21 @@ async def extract_patient(
         except Exception:
             await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
             raise
+        if settings.queue_async_response_enabled:
+            status_path = f"/api/v1/extract-patient/{saved.id}"
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                headers={
+                    "X-Job-Id": saved.id,
+                    "Location": status_path,
+                },
+                content={
+                    "job_id": saved.id,
+                    "document_id": saved.id,
+                    "status": "queued",
+                    "status_url": status_path,
+                },
+            )
         return await coordinator.wait_for_result(saved.id)
 
     runtime = RuntimeServices(

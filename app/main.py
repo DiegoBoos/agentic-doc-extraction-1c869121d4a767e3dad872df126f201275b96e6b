@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from app.logging_setup import configure_logging
 from fastapi.responses import JSONResponse
 
-from app.api.routes import health, parsing, patient
+from app.api.routes import health, jobs, parsing, patient
 from app.db.connectiondb import ensure_billing_schema
 from app.services.runtime import build_runtime
 
@@ -62,3 +62,4 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(health.router)
 app.include_router(parsing.router, prefix="/api/v1")
 app.include_router(patient.router, prefix="/api/v1")
+app.include_router(jobs.router, prefix="/api/v1")
