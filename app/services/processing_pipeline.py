@@ -133,33 +133,48 @@ async def run_parse_pipeline(
             (time.perf_counter() - ocr_started_at) * 1000,
         )
 
+        extraction_kwargs: dict[str, Any] = {}
+        strategy_label = "default"
         if extracted_pages >= settings.processing_large_document_page_threshold:
+            extraction_kwargs = {
+                "chunk_target_tokens": settings.openai_large_document_chunk_target_tokens,
+                "chunk_max_pages": settings.openai_large_document_chunk_max_pages,
+                "chunk_overlap_pages": settings.openai_large_document_chunk_overlap_pages,
+                "strategy_label": "large-document",
+            }
+            strategy_label = "large-document"
             logger.warning(
-                "Large document detected | document_id=%s file=%s pages=%s threshold=%s",
+                "Large document mode enabled | document_id=%s file=%s pages=%s threshold=%s chunk_target_tokens=%s chunk_max_pages=%s overlap_pages=%s",
                 saved.id,
                 saved.filename,
                 extracted_pages,
                 settings.processing_large_document_page_threshold,
+                settings.openai_large_document_chunk_target_tokens,
+                settings.openai_large_document_chunk_max_pages,
+                settings.openai_large_document_chunk_overlap_pages,
             )
 
         llm_started_at = time.perf_counter()
         logger.info(
-            "Starting parse LLM stage | document_id=%s file=%s provider=%s markdown_chars=%s chunks=%s",
+            "Starting parse LLM stage | document_id=%s file=%s provider=%s strategy=%s markdown_chars=%s chunks=%s",
             saved.id,
             saved.filename,
             extractor.model,
+            strategy_label,
             len(parsed.markdown),
             len(parsed.chunks),
         )
         extraction, tokens_input, tokens_output = await extractor.extract_authorization(
             parsed.markdown,
             parsed.chunks,
+            **extraction_kwargs,
         )
         processed_authorizations = count_processed_authorizations(extraction)
         logger.info(
-            "Completed parse LLM stage | document_id=%s file=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            "Completed parse LLM stage | document_id=%s file=%s strategy=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
             saved.id,
             saved.filename,
+            strategy_label,
             processed_authorizations,
             tokens_input,
             tokens_output,

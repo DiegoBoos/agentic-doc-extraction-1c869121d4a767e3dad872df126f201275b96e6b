@@ -122,35 +122,56 @@ class OpenAIExtractorService:
         self.chunk_target_tokens = settings.openai_chunk_target_tokens
         self.chunk_max_pages = settings.openai_chunk_max_pages
         self.chunk_overlap_pages = settings.openai_chunk_overlap_pages
+        self.large_document_chunk_target_tokens = (
+            settings.openai_large_document_chunk_target_tokens
+        )
+        self.large_document_chunk_max_pages = settings.openai_large_document_chunk_max_pages
+        self.large_document_chunk_overlap_pages = (
+            settings.openai_large_document_chunk_overlap_pages
+        )
 
         logger.info(
             "LLM extractor ready | provider=openai model=%s max_input_tokens=%s "
-            "chunk_target_tokens=%s chunk_max_pages=%s",
+            "chunk_target_tokens=%s chunk_max_pages=%s large_chunk_target_tokens=%s "
+            "large_chunk_max_pages=%s",
             self.model,
             self.max_input_tokens,
             self.chunk_target_tokens,
             self.chunk_max_pages,
+            self.large_document_chunk_target_tokens,
+            self.large_document_chunk_max_pages,
         )
 
     async def extract_authorization(
         self,
         markdown: str,
         document_chunks: list[dict[str, Any]] | None = None,
+        *,
+        chunk_target_tokens: int | None = None,
+        chunk_max_pages: int | None = None,
+        chunk_overlap_pages: int | None = None,
+        strategy_label: str = "default",
     ) -> tuple[AuthorizationResponse, int, int]:
         started_at = time.perf_counter()
+        resolved_chunk_target_tokens = chunk_target_tokens or self.chunk_target_tokens
+        resolved_chunk_max_pages = chunk_max_pages or self.chunk_max_pages
+        resolved_chunk_overlap_pages = (
+            self.chunk_overlap_pages if chunk_overlap_pages is None else chunk_overlap_pages
+        )
         text_chunks = build_authorization_chunks(
             markdown=markdown,
             chunks=document_chunks,
             max_input_tokens=self.max_input_tokens,
-            target_chunk_tokens=self.chunk_target_tokens,
-            max_pages_per_chunk=self.chunk_max_pages,
-            overlap_pages=self.chunk_overlap_pages,
+            target_chunk_tokens=resolved_chunk_target_tokens,
+            max_pages_per_chunk=resolved_chunk_max_pages,
+            overlap_pages=resolved_chunk_overlap_pages,
         )
 
         if len(text_chunks) == 1:
             logger.info(
-                "Starting single-pass authorization extraction | model=%s markdown_chars=%s estimated_tokens=%s",
+                "Starting single-pass authorization extraction | model=%s strategy=%s markdown_chars=%s estimated_tokens=%s",
                 self.model,
+                strategy_label,
                 len(markdown),
                 text_chunks[0].estimated_tokens,
             )
@@ -160,8 +181,9 @@ class OpenAIExtractorService:
                     is_fragment=False,
                 )
                 logger.info(
-                    "Completed single-pass authorization extraction | model=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+                    "Completed single-pass authorization extraction | model=%s strategy=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
                     self.model,
+                    strategy_label,
                     len(result.authorizations),
                     tokens_input,
                     tokens_output,
@@ -177,7 +199,7 @@ class OpenAIExtractorService:
                     markdown=markdown,
                     chunks=None,
                     max_input_tokens=1,
-                    target_chunk_tokens=max(4000, self.chunk_target_tokens // 2),
+                    target_chunk_tokens=max(4000, resolved_chunk_target_tokens // 2),
                     max_pages_per_chunk=1,
                     overlap_pages=0,
                 )
@@ -187,10 +209,14 @@ class OpenAIExtractorService:
         total_output_tokens = 0
 
         logger.info(
-            "Starting chunked authorization extraction | chunks=%s model=%s markdown_chars=%s",
+            "Starting chunked authorization extraction | chunks=%s model=%s strategy=%s markdown_chars=%s chunk_target_tokens=%s chunk_max_pages=%s overlap_pages=%s",
             len(text_chunks),
             self.model,
+            strategy_label,
             len(markdown),
+            resolved_chunk_target_tokens,
+            resolved_chunk_max_pages,
+            resolved_chunk_overlap_pages,
         )
 
         for index, chunk in enumerate(text_chunks, start=1):
@@ -224,8 +250,9 @@ class OpenAIExtractorService:
 
         merged_response = AuthorizationResponse(authorizations=merged)
         logger.info(
-            "Completed chunked authorization extraction | chunks=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
+            "Completed chunked authorization extraction | chunks=%s strategy=%s authorizations=%s tokens_in=%s tokens_out=%s elapsed_ms=%.2f",
             len(text_chunks),
+            strategy_label,
             len(merged_response.authorizations),
             total_input_tokens,
             total_output_tokens,

@@ -115,7 +115,7 @@ class Settings(BaseSettings):
         ),
     )
     processing_large_document_page_threshold: int = Field(
-        default=50,
+        default=12,
         validation_alias=AliasChoices(
             "PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
             "DOC_EXTRACTION_PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
@@ -147,6 +147,27 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "OPENAI_CHUNK_OVERLAP_PAGES",
             "DOC_EXTRACTION_OPENAI_CHUNK_OVERLAP_PAGES",
+        ),
+    )
+    openai_large_document_chunk_target_tokens: int = Field(
+        default=10000,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_TARGET_TOKENS",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_TARGET_TOKENS",
+        ),
+    )
+    openai_large_document_chunk_max_pages: int = Field(
+        default=4,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_MAX_PAGES",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_MAX_PAGES",
+        ),
+    )
+    openai_large_document_chunk_overlap_pages: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_OVERLAP_PAGES",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_OVERLAP_PAGES",
         ),
     )
     allowed_upload_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"]
