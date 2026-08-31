@@ -4,17 +4,16 @@ import asyncio
 import logging
 
 from app.db.connectiondb import ensure_billing_schema
+from app.logging_setup import configure_logging
 from app.services.job_orchestrator import process_job
 from app.services.runtime import build_runtime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
 async def run_worker() -> None:
+    configure_logging()
     runtime = await build_runtime()
     ensure_billing_schema()
 

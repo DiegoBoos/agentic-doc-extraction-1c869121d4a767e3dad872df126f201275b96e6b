@@ -2,21 +2,21 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+
+from app.logging_setup import configure_logging
 from fastapi.responses import JSONResponse
 
 from app.api.routes import health, parsing, patient
 from app.db.connectiondb import ensure_billing_schema
 from app.services.runtime import build_runtime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     runtime = await build_runtime()
     ensure_billing_schema()
 
