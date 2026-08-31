@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -30,6 +32,33 @@ class ServiciosAutorizados(BaseModel):
     grupo_servicio: str | None = None
     items: list[ServicioAutorizadoItem] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def normalize_location_vs_group(self) -> "ServiciosAutorizados":
+        location_values = {"ambulatorio", "hospitalario", "urgencias", "domiciliario"}
+        group_values = {
+            "consulta externa",
+            "hospitalización",
+            "hospitalizacion",
+            "cirugía",
+            "cirugia",
+            "apoyo diagnóstico",
+            "apoyo diagnostico",
+        }
+
+        ubicacion = (self.ubicacion_paciente or "").strip()
+        grupo = (self.grupo_servicio or "").strip()
+        ubicacion_l = ubicacion.lower()
+        grupo_l = grupo.lower()
+
+        if not ubicacion and grupo_l in location_values:
+            self.ubicacion_paciente = grupo
+            self.grupo_servicio = None
+        elif not grupo and ubicacion_l in group_values:
+            self.grupo_servicio = ubicacion
+            self.ubicacion_paciente = None
+
+        return self
+
 
 class AuthorizationExtraction(BaseModel):
     numero_autorizacion: str | None = None
@@ -38,6 +67,32 @@ class AuthorizationExtraction(BaseModel):
     datos_paciente: DatosPaciente = Field(default_factory=DatosPaciente)
     servicios_autorizados: ServiciosAutorizados = Field(default_factory=ServiciosAutorizados)
     vigencia: str | None = None
+
+    @field_validator("fecha_autorizacion", mode="before")
+    @classmethod
+    def normalize_fecha_autorizacion(cls, value: str | None) -> str | None:
+        if value is None or not isinstance(value, str):
+            return value
+        text = value.strip()
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text, fmt).strftime("%Y/%m/%d")
+            except ValueError:
+                continue
+        return text
+
+    @field_validator("vigencia", mode="before")
+    @classmethod
+    def normalize_vigencia(cls, value: str | None) -> str | None:
+        if value is None or not isinstance(value, str):
+            return value
+        text = " ".join(value.strip().split())
+        upper = text.upper()
+        if upper.endswith(" DIAS"):
+            digits = "".join(ch for ch in upper if ch.isdigit())
+            if digits:
+                return f"{digits} dias"
+        return text
 
     @field_validator("numero_autorizacion", mode="before")
     @classmethod

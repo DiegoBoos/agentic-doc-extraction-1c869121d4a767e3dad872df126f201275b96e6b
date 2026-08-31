@@ -30,6 +30,28 @@ Instrucciones:
 4. Devuelve una lista de autorizaciones en el campo 'authorizations'.
 5. En items, incluye cada servicio autorizado con su codigo_cups, cantidad,
    dias_tratamiento y descripcion.
+6. No inventes información. Si un campo no es claro o no aparece, usa null.
+7. fecha_autorizacion:
+   - extrae la fecha de expedición/emisión/autorización del documento,
+   - normalízala como YYYY/MM/DD si es posible,
+   - no uses fechas de vigencia, de cita o de vencimiento como fecha_autorizacion.
+8. vigencia:
+   - prioriza el TEXTO LITERAL de duración o vigencia, por ejemplo "120 dias",
+   - si el documento dice una duración y también una fecha futura, conserva la duración,
+   - no reemplaces vigencia por una fecha de vencimiento salvo que no exista duración explícita.
+9. servicios_autorizados.ubicacion_paciente:
+   - representa la ubicación/modalidad del paciente, por ejemplo: Ambulatorio,
+     Hospitalario, Urgencias, Domiciliario,
+   - no pongas aquí el grupo del servicio.
+10. servicios_autorizados.grupo_servicio:
+   - representa la categoría del servicio, por ejemplo: Consulta externa,
+     Hospitalización, Cirugía, Apoyo diagnóstico,
+   - no pongas aquí valores de ubicación del paciente como Ambulatorio.
+11. Si ves ambos valores, usa este mapeo:
+   - Ambulatorio/Hospitalario/Urgencias/Domiciliario -> ubicacion_paciente
+   - Consulta externa/Hospitalización/Cirugía/etc. -> grupo_servicio
+12. Conserva el texto clínico/administrativo fiel al documento; no resumas ni parafrasees
+   los nombres de prestador o descripciones CUPS.
 """.strip()
 
 PATIENT_SYSTEM_PROMPT = """
@@ -195,13 +217,17 @@ class OpenAIExtractorService:
         if is_fragment:
             user_content = (
                 "Extrae todas las autorizaciones médicas del siguiente fragmento del documento "
-                "y responde en el esquema estructurado.\n\n"
+                "y responde en el esquema estructurado.\n"
+                "Recuerda especialmente: vigencia no es fecha de vencimiento si existe una "
+                "duración explícita; ubicacion_paciente y grupo_servicio no deben mezclarse.\n\n"
                 f"{chunk.text}"
             )
         else:
             user_content = (
                 "Extrae todas las autorizaciones médicas del siguiente markdown y responde "
-                "en el esquema estructurado.\n\n"
+                "en el esquema estructurado.\n"
+                "Recuerda especialmente: vigencia no es fecha de vencimiento si existe una "
+                "duración explícita; ubicacion_paciente y grupo_servicio no deben mezclarse.\n\n"
                 f"{chunk.text}"
             )
 
