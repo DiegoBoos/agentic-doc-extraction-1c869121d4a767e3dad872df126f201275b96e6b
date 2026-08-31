@@ -25,32 +25,37 @@ Instrucciones:
    Puede aparecer con variantes como: "AUTORIZACION No.:", "AUTORIZACION No .:",
    "AUTORIZACIÓN No:", "AUTORIZACION N°"
    o diferencias de espacios/acentos; trata todas esas variantes como equivalentes.
-3. El numero_autorizacion debe tener exactamente 14 dígitos. Si no cumple, pasa a la
-   siguiente, no la incluyas.
-4. Devuelve una lista de autorizaciones en el campo 'authorizations'.
-5. En items, incluye cada servicio autorizado con su codigo_cups, cantidad,
+   Si el documento es una SOLICITUD y no trae numero_autorizacion final de 14 dígitos,
+   usa 'numero_solicitud' como ancla secundaria para separar cada registro.
+3. El numero_autorizacion debe tener exactamente 14 dígitos. Si no cumple, deja
+   numero_autorizacion en null.
+4. Si no existe numero_autorizacion válido pero sí aparece "No. Solicitud" o variantes
+   equivalentes, llena 'numero_solicitud' con ese consecutivo y conserva el registro.
+   No inventes un numero_autorizacion de 14 dígitos.
+5. Devuelve una lista de autorizaciones en el campo 'authorizations'.
+6. En items, incluye cada servicio autorizado con su codigo_cups, cantidad,
    dias_tratamiento y descripcion.
-6. No inventes información. Si un campo no es claro o no aparece, usa null.
-7. fecha_autorizacion:
+7. No inventes información. Si un campo no es claro o no aparece, usa null.
+8. fecha_autorizacion:
    - extrae la fecha de expedición/emisión/autorización del documento,
    - normalízala como YYYY/MM/DD si es posible,
    - no uses fechas de vigencia, de cita o de vencimiento como fecha_autorizacion.
-8. vigencia:
+9. vigencia:
    - prioriza el TEXTO LITERAL de duración o vigencia, por ejemplo "120 dias",
    - si el documento dice una duración y también una fecha futura, conserva la duración,
    - no reemplaces vigencia por una fecha de vencimiento salvo que no exista duración explícita.
-9. servicios_autorizados.ubicacion_paciente:
+10. servicios_autorizados.ubicacion_paciente:
    - representa la ubicación/modalidad del paciente, por ejemplo: Ambulatorio,
      Hospitalario, Urgencias, Domiciliario,
    - no pongas aquí el grupo del servicio.
-10. servicios_autorizados.grupo_servicio:
+11. servicios_autorizados.grupo_servicio:
    - representa la categoría del servicio, por ejemplo: Consulta externa,
      Hospitalización, Cirugía, Apoyo diagnóstico,
    - no pongas aquí valores de ubicación del paciente como Ambulatorio.
-11. Si ves ambos valores, usa este mapeo:
+12. Si ves ambos valores, usa este mapeo:
    - Ambulatorio/Hospitalario/Urgencias/Domiciliario -> ubicacion_paciente
    - Consulta externa/Hospitalización/Cirugía/etc. -> grupo_servicio
-12. Conserva el texto clínico/administrativo fiel al documento; no resumas ni parafrasees
+13. Conserva el texto clínico/administrativo fiel al documento; no resumas ni parafrasees
    los nombres de prestador o descripciones CUPS.
 """.strip()
 

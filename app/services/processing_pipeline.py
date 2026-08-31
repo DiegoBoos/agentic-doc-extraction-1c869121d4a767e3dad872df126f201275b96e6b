@@ -406,6 +406,19 @@ def _normalize_date_text(value: Any) -> Any:
     return text
 
 
+def _normalize_generic_number(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        value = str(value)
+    if not isinstance(value, str):
+        return None
+    digits = "".join(ch for ch in value if ch.isdigit())
+    if len(digits) < 3:
+        return None
+    return digits
+
+
 def _extract_document_vigencia(markdown: str | None) -> str | None:
     if not markdown:
         return None
@@ -419,6 +432,25 @@ def _extract_document_vigencia(markdown: str | None) -> str | None:
         if match:
             return f"{match.group(1)} dias"
     return None
+
+
+def _extract_document_solicitud_numbers(markdown: str | None) -> list[str]:
+    if not markdown:
+        return []
+
+    patterns = [
+        r"no\.?\s*solicitud\s*[:\-#]?\s*(\d{3,20})",
+        r"solicitud\s+no\.?\s*[:\-#]?\s*(\d{3,20})",
+    ]
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, markdown, flags=re.IGNORECASE):
+            digits = _normalize_generic_number(match.group(1))
+            if digits and digits not in seen:
+                seen.add(digits)
+                found.append(digits)
+    return found
 
 
 def _normalize_vigencia_value(value: Any, *, document_vigencia: str | None = None) -> Any:
@@ -490,6 +522,7 @@ def normalize_authorizations(
         document_vigencia = _extract_document_vigencia(markdown)
         document_location = _extract_document_location(markdown)
         document_group = _extract_document_group(markdown)
+        document_solicitudes = _extract_document_solicitud_numbers(markdown)
 
         for auth_item in auth_list:
             prestador = auth_item.get("prestador_autorizado") or {}
@@ -506,6 +539,9 @@ def normalize_authorizations(
 
             auth_item["fecha_autorizacion"] = _normalize_date_text(
                 auth_item.get("fecha_autorizacion")
+            )
+            auth_item["numero_solicitud"] = _normalize_generic_number(
+                auth_item.get("numero_solicitud")
             )
             auth_item["vigencia"] = _normalize_vigencia_value(
                 auth_item.get("vigencia"),
@@ -527,18 +563,39 @@ def normalize_authorizations(
             servicios["ubicacion_paciente"] = ubicacion
             auth_item["servicios_autorizados"] = servicios
 
+        if not auth_list and document_solicitudes:
+            auth_list = [
+                {
+                    "numero_autorizacion": None,
+                    "numero_solicitud": solicitud,
+                    "fecha_autorizacion": None,
+                    "prestador_autorizado": {},
+                    "datos_paciente": {},
+                    "servicios_autorizados": {
+                        "ubicacion_paciente": document_location,
+                        "grupo_servicio": document_group,
+                        "items": [],
+                    },
+                    "vigencia": document_vigencia,
+                }
+                for solicitud in document_solicitudes
+            ]
+
         filtered = [
             auth_item
             for auth_item in auth_list
             if auth_item.get("numero_autorizacion") not in (None, "")
+            or auth_item.get("numero_solicitud") not in (None, "")
         ]
 
         seen: set[str] = set()
         deduped: list[dict[str, Any]] = []
         for auth_item in filtered:
-            numero = auth_item.get("numero_autorizacion", "")
-            if numero not in seen:
-                seen.add(numero)
+            numero = auth_item.get("numero_autorizacion") or ""
+            solicitud = auth_item.get("numero_solicitud") or ""
+            identity = f"auth:{numero}" if numero else f"sol:{solicitud}"
+            if identity not in seen:
+                seen.add(identity)
                 deduped.append(auth_item)
 
         if "authorizations" in data:

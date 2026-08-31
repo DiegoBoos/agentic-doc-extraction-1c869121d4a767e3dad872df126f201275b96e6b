@@ -62,6 +62,7 @@ class ServiciosAutorizados(BaseModel):
 
 class AuthorizationExtraction(BaseModel):
     numero_autorizacion: str | None = None
+    numero_solicitud: str | None = None
     fecha_autorizacion: str | None = None
     prestador_autorizado: PrestadorAutorizado = Field(default_factory=PrestadorAutorizado)
     datos_paciente: DatosPaciente = Field(default_factory=DatosPaciente)
@@ -108,6 +109,20 @@ class AuthorizationExtraction(BaseModel):
             return None
         return digits
 
+    @field_validator("numero_solicitud", mode="before")
+    @classmethod
+    def normalize_numero_solicitud(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            value = str(value)
+        if not isinstance(value, str):
+            return None
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if len(digits) < 3:
+            return None
+        return digits
+
 
 class AuthorizationResponse(BaseModel):
     authorizations: list[AuthorizationExtraction] = Field(default_factory=list)
@@ -115,6 +130,9 @@ class AuthorizationResponse(BaseModel):
     @model_validator(mode="after")
     def filter_invalid_authorizations(self) -> "AuthorizationResponse":
         self.authorizations = [
-            auth for auth in self.authorizations if auth.numero_autorizacion not in (None, "")
+            auth
+            for auth in self.authorizations
+            if auth.numero_autorizacion not in (None, "")
+            or auth.numero_solicitud not in (None, "")
         ]
         return self
