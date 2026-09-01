@@ -57,10 +57,11 @@ RUN chmod +x /app/docker-entrypoint.sh \
 # Expose port
 EXPOSE 5090
 
-# Health check — for workers (APP_ROLE=worker) verify the process is alive;
-# for the API role fall back to the HTTP endpoint.
+# Health check — for workers (APP_ROLE=worker) verify PID 1 is the worker
+# process without depending on procps/pgrep; for the API role fall back to
+# the HTTP endpoint.
 HEALTHCHECK --interval=30s --timeout=20s --start-period=45s --retries=5 \
-    CMD if [ "$APP_ROLE" = "worker" ]; then pgrep -f "app.worker" > /dev/null; else curl -f http://localhost:5090/health || exit 1; fi
+    CMD if [ "$APP_ROLE" = "worker" ]; then tr '\000' ' ' < /proc/1/cmdline | grep -F "app.worker" > /dev/null; else curl -f http://localhost:5090/health || exit 1; fi
 
 # Run API or worker role with the same image
 CMD ["/app/docker-entrypoint.sh"]
