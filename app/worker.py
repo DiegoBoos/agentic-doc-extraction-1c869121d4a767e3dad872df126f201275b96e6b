@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from redis.exceptions import RedisError
+
 from app.db.connectiondb import ensure_billing_schema
 from app.logging_setup import configure_logging
 from app.services.job_orchestrator import process_job
@@ -21,6 +23,7 @@ async def run_worker() -> None:
         raise RuntimeError("Worker requires JOB_QUEUE_MODE=redis and a valid Redis connection.")
 
     max_in_flight = max(1, runtime.settings.processing_max_concurrent_documents)
+    reconnect_backoff_seconds = 2
     in_flight: set[asyncio.Task] = set()
 
     logger.info(
@@ -40,7 +43,30 @@ async def run_worker() -> None:
                 for task in done:
                     task.result()
 
-            job_id = await runtime.job_queue.dequeue(timeout_seconds=5)
+            try:
+                job_id = await runtime.job_queue.dequeue(timeout_seconds=5)
+            except RedisError as exc:
+                logger.warning(
+                    "Redis queue dequeue interrupted | queue=%s error=%s",
+                    runtime.settings.job_queue_name,
+                    exc,
+                )
+                try:
+                    await runtime.job_queue.reconnect()
+                except RedisError as reconnect_exc:
+                    logger.warning(
+                        "Redis queue reconnect failed | queue=%s error=%s",
+                        runtime.settings.job_queue_name,
+                        reconnect_exc,
+                    )
+                    await asyncio.sleep(reconnect_backoff_seconds)
+                else:
+                    logger.info(
+                        "Redis queue reconnected | queue=%s",
+                        runtime.settings.job_queue_name,
+                    )
+                continue
+
             if job_id is None:
                 continue
 
