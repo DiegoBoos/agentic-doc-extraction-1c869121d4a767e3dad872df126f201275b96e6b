@@ -1,38 +1,59 @@
-import json
-import logging
-import shutil
-from pathlib import Path
+from __future__ import annotations
+
+import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
-from app.db.connectiondb import save_billing_metadata
-from app.dependencies.services import get_extractor, get_parser, get_settings, require_api_key
-from app.schemas.patient import PatientDataResponse
+from app.dependencies.services import (
+    get_extractor,
+    get_job_coordinator,
+    get_parser,
+    get_processing_limiter,
+    get_settings,
+    require_api_key,
+)
 from app.services.document_parser import DocumentParserRouter
-from app.services.fhir_mapper import patient_data_to_fhir
 from app.services.file_ingest import FileTooLargeError, save_upload
-from app.services.openai_extractor import LLMConnectionError, OpenAIExtractorService
-
-logger = logging.getLogger(__name__)
+from app.db.connectiondb import get_processing_job
+from app.services.job_orchestrator import (
+    JobCoordinator,
+    run_direct_patient,
+    serialize_processing_job,
+)
+from app.services.openai_extractor import OpenAIExtractorService
+from app.services.processing_limiter import ProcessingLimiter
+from app.services.processing_pipeline import (
+    JOB_TYPE_PATIENT,
+    _count_pdf_pages,
+    cleanup_processing_artifacts,
+)
+from app.services.runtime import RuntimeServices
 
 router = APIRouter(prefix="/extract-patient", tags=["patient"])
 
 ParserDep = Annotated[DocumentParserRouter, Depends(get_parser)]
 ExtractorDep = Annotated[OpenAIExtractorService, Depends(get_extractor)]
+LimiterDep = Annotated[ProcessingLimiter, Depends(get_processing_limiter)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 UploadFileDep = Annotated[UploadFile, File(...)]
+JobCoordinatorDep = Annotated[JobCoordinator | None, Depends(get_job_coordinator)]
 
 
-def _count_extracted_pages(json_output_path: str) -> int:
-    try:
-        with Path(json_output_path).open("r", encoding="utf-8") as handle:
-            azure_data = json.load(handle)
-        pages = azure_data.get("pages", [])
-        return len(pages)
-    except Exception:
-        return 0
+@router.get("/{job_id}")
+async def get_patient_job_status(
+    job_id: str,
+    _auth: None = Depends(require_api_key),
+):
+    job = await asyncio.to_thread(get_processing_job, job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Processing job not found: {job_id}",
+        )
+    return serialize_processing_job(job)
 
 
 @router.post(
@@ -44,6 +65,8 @@ async def extract_patient(
     parser: ParserDep,
     settings: SettingsDep,
     extractor: ExtractorDep,
+    limiter: LimiterDep,
+    coordinator: JobCoordinatorDep,
     _auth: None = Depends(require_api_key),
 ) -> dict[str, Any]:
     if not file.filename:
@@ -57,89 +80,66 @@ async def extract_patient(
             allowed_extensions={".pdf"},
             allowed_content_types={"application/pdf"},
         )
-    except FileTooLargeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=str(e),
-        ) from e
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-
-    try:
-        parsed = parser.parse_first_page(
-            document_path=Path(saved.stored_path),
-            document_id=saved.id,
-        )
-        extraction, tokens_input, tokens_output = await extractor.extract_patient_data(
-            parsed.markdown
-        )
-
-        extracted_pages = _count_extracted_pages(parsed.json_output_path)
-        save_billing_metadata(
-            document_id=saved.id,
-            filename=file.filename,
-            extracted_pages=extracted_pages,
-            azure_model_id=parsed.model,
-            tokens_input=tokens_input,
-            tokens_output=tokens_output,
-            processed_authorizations=0,
-        )
-
-        # Build flat response for internal tracking
-        flat_response = PatientDataResponse(
-            document_id=saved.id,
-            filename=saved.filename,
-            content_type=saved.content_type,
-            size_bytes=saved.size_bytes,
-            created_at=saved.created_at,
-            provider=parsed.provider,
-            model=parsed.model,
-            extracted_pages=extracted_pages,
-            chunk_count=len(parsed.chunks),
-            tokens_input=tokens_input,
-            tokens_output=tokens_output,
-            patient=extraction.patient,
-        )
-
-        # Map to FHIR Patient RDA
-        fhir_patient = patient_data_to_fhir(extraction.patient)
-
-        return {
-            "meta": {
-                "document_id": saved.id,
-                "filename": saved.filename,
-                "provider": parsed.provider,
-                "model": parsed.provider,
-                "extracted_pages": extracted_pages,
-                "tokens_input": tokens_input,
-                "tokens_output": tokens_output,
-            },
-            "data": fhir_patient,
-        }
-
     except FileTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Archivo demasiado grande para procesar.",
-        ) from exc
-    except LLMConnectionError as exc:
-        logger.error("LLM unavailable for patient extraction %s: %s", saved.id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Servicio de extracción LLM no disponible. Intente de nuevo más tarde.",
+            detail=str(exc),
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception(
-            "Unhandled error extracting patient data | file=%s document_id=%s",
-            file.filename,
-            saved.id,
-        )
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(exc)}") from exc
-    finally:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # --- Page-count gate: reject before Azure/LLM ---
+    from pathlib import Path
+
+    max_pages = settings.max_upload_pages
+    if max_pages > 0:
+        page_count = _count_pdf_pages(Path(saved.stored_path))
+        if page_count is not None and page_count > max_pages:
+            await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": True,
+                    "error_type": "document_too_large",
+                    "detail": (
+                        f"El documento '{saved.filename}' tiene {page_count} páginas "
+                        f"y excede el máximo permitido de {max_pages}."
+                    ),
+                    "filename": saved.filename,
+                    "pages": page_count,
+                    "max_pages": max_pages,
+                    "document_id": saved.id,
+                },
+            )
+
+    if coordinator is not None:
         try:
-            Path(saved.stored_path).unlink(missing_ok=True)
-            shutil.rmtree(settings.parse_output_dir / saved.id, ignore_errors=True)
+            await coordinator.submit(job_type=JOB_TYPE_PATIENT, saved=saved)
         except Exception:
-            pass
+            await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
+            raise
+        if settings.queue_async_response_enabled:
+            status_path = f"/api/v1/extract-patient/{saved.id}"
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                headers={
+                    "X-Job-Id": saved.id,
+                    "Location": status_path,
+                },
+                content={
+                    "job_id": saved.id,
+                    "document_id": saved.id,
+                    "status": "queued",
+                    "status_url": status_path,
+                },
+            )
+        return await coordinator.wait_for_result(saved.id)
+
+    runtime = RuntimeServices(
+        settings=settings,
+        parser=parser,
+        extractor=extractor,
+        processing_limiter=limiter,
+        job_queue=None,
+    )
+    return await run_direct_patient(saved=saved, runtime=runtime)

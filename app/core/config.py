@@ -9,6 +9,167 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("data/uploads")
     parse_output_dir: Path = Path("data/parsed")
     max_upload_size_mb: int = 50
+    job_queue_mode: str = Field(
+        default="direct",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_MODE",
+            "DOC_EXTRACTION_JOB_QUEUE_MODE",
+        ),
+    )
+    job_queue_name: str = Field(
+        default="agentic-doc-extraction:jobs",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_NAME",
+            "DOC_EXTRACTION_JOB_QUEUE_NAME",
+        ),
+    )
+    job_queue_wait_timeout_seconds: int = Field(
+        default=900,
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_WAIT_TIMEOUT_SECONDS",
+            "DOC_EXTRACTION_JOB_QUEUE_WAIT_TIMEOUT_SECONDS",
+        ),
+    )
+    job_queue_poll_interval_ms: int = Field(
+        default=500,
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_POLL_INTERVAL_MS",
+            "DOC_EXTRACTION_JOB_QUEUE_POLL_INTERVAL_MS",
+        ),
+    )
+    job_queue_response_mode: str = Field(
+        default="sync",
+        validation_alias=AliasChoices(
+            "JOB_QUEUE_RESPONSE_MODE",
+            "DOC_EXTRACTION_JOB_QUEUE_RESPONSE_MODE",
+        ),
+    )
+    billing_max_retries: int = Field(
+        default=3,
+        validation_alias=AliasChoices(
+            "BILLING_MAX_RETRIES",
+            "DOC_EXTRACTION_BILLING_MAX_RETRIES",
+        ),
+    )
+    billing_retry_delay_ms: int = Field(
+        default=750,
+        validation_alias=AliasChoices(
+            "BILLING_RETRY_DELAY_MS",
+            "DOC_EXTRACTION_BILLING_RETRY_DELAY_MS",
+        ),
+    )
+    redis_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REDIS_URL",
+            "DOC_EXTRACTION_REDIS_URL",
+        ),
+    )
+    redis_host: str = Field(
+        default="127.0.0.1",
+        validation_alias=AliasChoices(
+            "REDIS_HOST",
+            "DOC_EXTRACTION_REDIS_HOST",
+        ),
+    )
+    redis_port: int = Field(
+        default=6379,
+        validation_alias=AliasChoices(
+            "REDIS_PORT",
+            "DOC_EXTRACTION_REDIS_PORT",
+        ),
+    )
+    redis_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "REDIS_PASSWORD",
+            "DOC_EXTRACTION_REDIS_PASSWORD",
+        ),
+    )
+    redis_db: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "REDIS_DB",
+            "DOC_EXTRACTION_REDIS_DB",
+        ),
+    )
+    worker_role: str = Field(
+        default="api",
+        validation_alias=AliasChoices(
+            "APP_ROLE",
+            "DOC_EXTRACTION_APP_ROLE",
+        ),
+    )
+    max_upload_pages: int = Field(
+        default=50,
+        validation_alias=AliasChoices(
+            "MAX_UPLOAD_PAGES",
+            "DOC_EXTRACTION_MAX_UPLOAD_PAGES",
+        ),
+    )
+    processing_max_concurrent_documents: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "PROCESSING_MAX_CONCURRENT_DOCUMENTS",
+            "DOC_EXTRACTION_PROCESSING_MAX_CONCURRENT_DOCUMENTS",
+        ),
+    )
+    processing_large_document_page_threshold: int = Field(
+        default=12,
+        validation_alias=AliasChoices(
+            "PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
+            "DOC_EXTRACTION_PROCESSING_LARGE_DOCUMENT_PAGE_THRESHOLD",
+        ),
+    )
+    openai_max_input_tokens: int = Field(
+        default=45000,
+        validation_alias=AliasChoices(
+            "OPENAI_MAX_INPUT_TOKENS",
+            "DOC_EXTRACTION_OPENAI_MAX_INPUT_TOKENS",
+        ),
+    )
+    openai_chunk_target_tokens: int = Field(
+        default=24000,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_TARGET_TOKENS",
+            "DOC_EXTRACTION_OPENAI_CHUNK_TARGET_TOKENS",
+        ),
+    )
+    openai_chunk_max_pages: int = Field(
+        default=12,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_MAX_PAGES",
+            "DOC_EXTRACTION_OPENAI_CHUNK_MAX_PAGES",
+        ),
+    )
+    openai_chunk_overlap_pages: int = Field(
+        default=1,
+        validation_alias=AliasChoices(
+            "OPENAI_CHUNK_OVERLAP_PAGES",
+            "DOC_EXTRACTION_OPENAI_CHUNK_OVERLAP_PAGES",
+        ),
+    )
+    openai_large_document_chunk_target_tokens: int = Field(
+        default=10000,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_TARGET_TOKENS",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_TARGET_TOKENS",
+        ),
+    )
+    openai_large_document_chunk_max_pages: int = Field(
+        default=4,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_MAX_PAGES",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_MAX_PAGES",
+        ),
+    )
+    openai_large_document_chunk_overlap_pages: int = Field(
+        default=0,
+        validation_alias=AliasChoices(
+            "OPENAI_LARGE_DOCUMENT_CHUNK_OVERLAP_PAGES",
+            "DOC_EXTRACTION_OPENAI_LARGE_DOCUMENT_CHUNK_OVERLAP_PAGES",
+        ),
+    )
     allowed_upload_extensions: list[str] = [".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"]
     allowed_upload_content_types: list[str] = [
         "application/pdf",
@@ -95,6 +256,22 @@ class Settings(BaseSettings):
             "DOC_EXTRACTION_DATABASE_URL",
         ),
     )
+
+    @property
+    def resolved_redis_url(self) -> str:
+        if self.redis_url:
+            return self.redis_url
+
+        auth = f":{self.redis_password}@" if self.redis_password else ""
+        return f"redis://{auth}{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    @property
+    def queue_enabled(self) -> bool:
+        return self.job_queue_mode.lower() == "redis"
+
+    @property
+    def queue_async_response_enabled(self) -> bool:
+        return self.job_queue_response_mode.strip().lower() in {"async", "accepted", "queued"}
 
     model_config = SettingsConfigDict(
         env_file=".env",

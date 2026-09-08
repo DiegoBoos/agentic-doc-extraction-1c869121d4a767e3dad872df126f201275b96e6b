@@ -1,18 +1,37 @@
-import json
+from __future__ import annotations
+
+import asyncio
 import logging
-import shutil
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import JSONResponse
 
 from app.core.config import Settings
-from app.db.connectiondb import save_billing_metadata
-from app.dependencies.services import get_extractor, get_parser, get_settings, require_api_key
+from app.dependencies.services import (
+    get_extractor,
+    get_job_coordinator,
+    get_parser,
+    get_processing_limiter,
+    get_settings,
+    require_api_key,
+)
 from app.services.document_parser import DocumentParserRouter
 from app.services.file_ingest import FileTooLargeError, save_upload
-from app.services.openai_extractor import LLMConnectionError, OpenAIExtractorService
-from app.services.utils import normalize_nit
+from app.db.connectiondb import get_processing_job
+from app.services.job_orchestrator import (
+    JobCoordinator,
+    run_direct_parse,
+    serialize_processing_job,
+)
+from app.services.openai_extractor import OpenAIExtractorService
+from app.services.processing_limiter import ProcessingLimiter
+from app.services.processing_pipeline import (
+    JOB_TYPE_PARSE,
+    _count_pdf_pages,
+    cleanup_processing_artifacts,
+)
+from app.services.runtime import RuntimeServices
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +39,24 @@ router = APIRouter(prefix="/parse", tags=["parse"])
 
 ParserDep = Annotated[DocumentParserRouter, Depends(get_parser)]
 ExtractorDep = Annotated[OpenAIExtractorService, Depends(get_extractor)]
+LimiterDep = Annotated[ProcessingLimiter, Depends(get_processing_limiter)]
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 UploadFileDep = Annotated[UploadFile, File(...)]
+JobCoordinatorDep = Annotated[JobCoordinator | None, Depends(get_job_coordinator)]
+
+
+@router.get("/{job_id}")
+async def get_parse_job_status(
+    job_id: str,
+    _auth: None = Depends(require_api_key),
+):
+    job = await asyncio.to_thread(get_processing_job, job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Processing job not found: {job_id}",
+        )
+    return serialize_processing_job(job)
 
 
 @router.post(
@@ -33,10 +68,19 @@ async def parse_document(
     parser: ParserDep,
     settings: SettingsDep,
     extractor: ExtractorDep,
+    limiter: LimiterDep,
+    coordinator: JobCoordinatorDep,
     _auth: None = Depends(require_api_key),
 ):
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
+
+    logger.info(
+        "Parse request received | filename=%s content_type=%s queue_enabled=%s",
+        file.filename,
+        file.content_type,
+        coordinator is not None,
+    )
 
     try:
         saved = await save_upload(
@@ -46,122 +90,102 @@ async def parse_document(
             allowed_extensions=set(settings.allowed_upload_extensions),
             allowed_content_types=set(settings.allowed_upload_content_types),
         )
-    except FileTooLargeError as e:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=str(e),
-        ) from e
-    except ValueError as e:
-        # Unsupported extension or content-type — client error, not a 500
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
-
-    try:
-        parsed = parser.parse_document(
-            document_path=Path(saved.stored_path),
-            document_id=saved.id,
-        )
-        extraction, tokens_input, tokens_output = await extractor.extract_authorization(
-            parsed.markdown
-        )
-
-        # Extraction and recording of billing metadata
-        azure_model_id = parsed.model
-        extracted_pages = 0
-        try:
-            with open(parsed.json_output_path, "r", encoding="utf-8") as f:
-                azure_data = json.load(f)
-            pages = azure_data.get("pages", [])
-            extracted_pages = len(pages)
-        except Exception:
-            pass
-
-        processed_authorizations = 0
-        if hasattr(extraction, "authorizations") and extraction.authorizations:
-            processed_authorizations = len(extraction.authorizations)
-        elif hasattr(extraction, "authorizations_list") and extraction.authorizations_list:
-            processed_authorizations = len(extraction.authorizations_list)
-        elif isinstance(extraction, list):
-            processed_authorizations = len(extraction)
-
-        save_billing_metadata(
-            document_id=saved.id,
-            filename=file.filename,
-            extracted_pages=extracted_pages,
-            azure_model_id=azure_model_id,
-            tokens_input=tokens_input,
-            tokens_output=tokens_output,
-            processed_authorizations=processed_authorizations,
-        )
-
-        # Normalize any NIT/identification numbers returned by the extractor
-        data = extraction.model_dump()
-
-        try:
-            # Handle both single AuthorizationExtraction (old) and AuthorizationResponse (new)
-            auth_list = data.get("authorizations") if "authorizations" in data else [data]
-
-            for auth_item in auth_list:
-                # prestador autorizado NIT
-                pa = auth_item.get("prestador_autorizado") or {}
-                if "numero_identificacion_o_nit" in pa:
-                    pa["numero_identificacion_o_nit"] = normalize_nit(
-                        pa.get("numero_identificacion_o_nit")
-                    )
-
-                dp = auth_item.get("datos_paciente") or {}
-                if "numero_identificacion" in dp:
-                    dp["numero_identificacion"] = normalize_nit(dp.get("numero_identificacion"))
-
-            # Filter out authorizations without numero_autorizacion
-            filtered = [
-                auth_item
-                for auth_item in auth_list
-                if auth_item.get("numero_autorizacion") not in (None, "")
-            ]
-
-            # Deduplicate by numero_autorizacion (14-digit), keeping first occurrence
-            seen: set[str] = set()
-            deduped: list[dict] = []
-            for auth_item in filtered:
-                num = auth_item.get("numero_autorizacion", "")
-                if num not in seen:
-                    seen.add(num)
-                    deduped.append(auth_item)
-
-            if "authorizations" in data:
-                data["authorizations"] = deduped
-            else:
-                if not filtered:
-                    data = {"authorizations": []}
-        except Exception:
-            # defensive: if normalization fails, return raw extraction
-            return extraction.model_dump()
-
-        return data
-
     except FileTooLargeError as exc:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Archivo demasiado grande para procesar.",
-        ) from exc
-    except LLMConnectionError as exc:
-        logger.error("LLM unavailable for document %s: %s", saved.id, exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Servicio de extracción LLM no disponible. Intente de nuevo más tarde.",
+            detail=str(exc),
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:
-        logger.exception(
-            "Unhandled error processing document | file=%s document_id=%s",
-            file.filename,
-            saved.id,
-        )
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(exc)}") from exc
-    finally:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    logger.info(
+        "Upload persisted | document_id=%s filename=%s size_bytes=%s stored_path=%s",
+        saved.id,
+        saved.filename,
+        saved.size_bytes,
+        saved.stored_path,
+    )
+
+    # --- Page-count gate: reject before Azure/LLM ---
+    from pathlib import Path
+
+    max_pages = settings.max_upload_pages
+    if max_pages > 0:
+        page_count = _count_pdf_pages(Path(saved.stored_path))
+        if page_count is not None and page_count > max_pages:
+            logger.warning(
+                "Parse request rejected by page gate | document_id=%s filename=%s pages=%s max=%s",
+                saved.id,
+                saved.filename,
+                page_count,
+                max_pages,
+            )
+            await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "error": True,
+                    "error_type": "document_too_large",
+                    "detail": (
+                        f"El documento '{saved.filename}' tiene {page_count} páginas "
+                        f"y excede el máximo permitido de {max_pages}."
+                    ),
+                    "filename": saved.filename,
+                    "pages": page_count,
+                    "max_pages": max_pages,
+                    "document_id": saved.id,
+                },
+            )
+
+    if coordinator is not None:
         try:
-            Path(saved.stored_path).unlink(missing_ok=True)
-            shutil.rmtree(settings.parse_output_dir / saved.id, ignore_errors=True)
+            logger.info(
+                "Submitting parse job to queue | document_id=%s filename=%s",
+                saved.id,
+                saved.filename,
+            )
+            await coordinator.submit(job_type=JOB_TYPE_PARSE, saved=saved)
         except Exception:
-            pass
+            await asyncio.to_thread(cleanup_processing_artifacts, saved, settings)
+            raise
+        if settings.queue_async_response_enabled:
+            logger.info(
+                "Returning async parse acceptance | document_id=%s filename=%s",
+                saved.id,
+                saved.filename,
+            )
+            status_path = f"/api/v1/parse/{saved.id}"
+            return JSONResponse(
+                status_code=status.HTTP_202_ACCEPTED,
+                headers={
+                    "X-Job-Id": saved.id,
+                    "Location": status_path,
+                },
+                content={
+                    "job_id": saved.id,
+                    "document_id": saved.id,
+                    "status": "queued",
+                    "status_url": status_path,
+                },
+            )
+        logger.info(
+            "Waiting synchronously for queued parse job | document_id=%s timeout_seconds=%s",
+            saved.id,
+            settings.job_queue_wait_timeout_seconds,
+        )
+        return await coordinator.wait_for_result(saved.id)
+
+    logger.info(
+        "Running parse request in direct mode | document_id=%s filename=%s",
+        saved.id,
+        saved.filename,
+    )
+
+    runtime = RuntimeServices(
+        settings=settings,
+        parser=parser,
+        extractor=extractor,
+        processing_limiter=limiter,
+        job_queue=None,
+    )
+    return await run_direct_parse(saved=saved, runtime=runtime)

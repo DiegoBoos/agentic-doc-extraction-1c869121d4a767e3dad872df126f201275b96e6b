@@ -4,63 +4,37 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.api.routes import health, parsing, patient
-from app.core.config import Settings
-from app.services.document_parser import (
-    AzureDocumentIntelligenceParser,
-    DocumentParserRouter,
-    GoogleCloudVisionParser,
-)
-from app.services.openai_extractor import OpenAIExtractorService
+from app.api.routes import health, jobs, parsing, patient, payment_file
+from app.db.connectiondb import ensure_billing_schema
+from app.logging_setup import configure_logging
+from app.services.runtime import build_runtime
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = Settings()
+    configure_logging()
+    runtime = await build_runtime()
+    ensure_billing_schema()
 
-    parsers = {}
-
-    try:
-        parsers["google_vision"] = GoogleCloudVisionParser(
-            output_root=settings.parse_output_dir,
-            credentials_file=settings.google_vision_credentials_file,
-        )
-    except Exception as exc:
-        print(f"WARNING: Google Cloud Vision could not be initialized: {exc}")
-
-    if settings.azure_document_intelligence_endpoint and settings.azure_document_intelligence_key:
-        parsers["azure"] = AzureDocumentIntelligenceParser(
-            output_root=settings.parse_output_dir,
-            endpoint=settings.azure_document_intelligence_endpoint,
-            key=settings.azure_document_intelligence_key,
-            model=settings.azure_document_intelligence_model,
-        )
-    else:
-        logger.warning("Azure Document Intelligence is not configured.")
-
-    default_provider = (
-        settings.ocr_provider
-        if settings.ocr_provider in parsers
-        else next(iter(parsers), "google_vision")
+    logger.info(
+        "Runtime ready | queue_enabled=%s max_concurrent_documents=%s large_document_threshold=%s",
+        runtime.settings.queue_enabled,
+        runtime.settings.processing_max_concurrent_documents,
+        runtime.settings.processing_large_document_page_threshold,
     )
 
-    parser = DocumentParserRouter(
-        default_provider=default_provider,
-        parsers=parsers,
-    )
-
-    extractor = OpenAIExtractorService(settings=settings)
-
-    app.state.settings = settings
-    app.state.parser = parser
-    app.state.extractor = extractor
+    app.state.settings = runtime.settings
+    app.state.parser = runtime.parser
+    app.state.extractor = runtime.extractor
+    app.state.processing_limiter = runtime.processing_limiter
+    app.state.job_queue = runtime.job_queue
     yield
+
+    if runtime.job_queue is not None:
+        await runtime.job_queue.close()
 
 
 app = FastAPI(
@@ -87,3 +61,5 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(health.router)
 app.include_router(parsing.router, prefix="/api/v1")
 app.include_router(patient.router, prefix="/api/v1")
+app.include_router(jobs.router, prefix="/api/v1")
+app.include_router(payment_file.router, prefix="/api/v1")

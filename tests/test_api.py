@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from pypdf import PdfReader, PdfWriter
 
 from app.main import app
+from app.api.routes import jobs as jobs_route_module
+from app.api.routes import parsing as parsing_route_module
 from app.schemas.authorization import AuthorizationExtraction, AuthorizationResponse
 from app.schemas.patient import PatientData, PatientExtractionResponse
 from app.services import document_parser as document_parser_module
@@ -35,7 +37,7 @@ def test_parse_endpoint_with_mocked_openai_structured_output() -> None:
 
         class _MockExtractor:
             async def extract_authorization(
-                self, _markdown: str
+                self, _markdown: str, _document_chunks=None
             ) -> tuple[AuthorizationResponse, int, int]:
                 return (
                     AuthorizationResponse(
@@ -73,7 +75,7 @@ def test_parse_endpoint_filters_null_authorization_number() -> None:
 
         class _MockExtractor:
             async def extract_authorization(
-                self, _markdown: str
+                self, _markdown: str, _document_chunks=None
             ) -> tuple[AuthorizationResponse, int, int]:
                 return (
                     AuthorizationResponse(authorizations=[AuthorizationExtraction()]),
@@ -90,6 +92,113 @@ def test_parse_endpoint_filters_null_authorization_number() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"authorizations": []}
+
+
+def test_parse_endpoint_returns_202_and_job_id_when_async_queue_mode(monkeypatch) -> None:
+    async def _fake_submit(self, *, job_type: str, saved) -> str:
+        return saved.id
+
+    monkeypatch.setattr(parsing_route_module.JobCoordinator, "submit", _fake_submit)
+
+    with TestClient(app) as client:
+        client.app.state.settings.job_queue_mode = "redis"
+        client.app.state.settings.job_queue_response_mode = "async"
+        client.app.state.job_queue = object()
+
+        response = client.post(
+            "/api/v1/parse",
+            files={"file": ("invoice.pdf", BytesIO(b"fake pdf bytes"), "application/pdf")},
+        )
+
+        client.app.state.settings.job_queue_mode = "direct"
+        client.app.state.settings.job_queue_response_mode = "sync"
+        client.app.state.job_queue = None
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["job_id"]
+    assert data["document_id"] == data["job_id"]
+    assert data["status"] == "queued"
+    assert data["status_url"] == f"/api/v1/parse/{data['job_id']}"
+    assert response.headers["x-job-id"] == data["job_id"]
+
+
+def test_parse_job_status_endpoint_returns_serialized_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        parsing_route_module,
+        "get_processing_job",
+        lambda job_id: {
+            "job_id": job_id,
+            "document_id": job_id,
+            "job_type": "parse",
+            "status": "succeeded",
+            "result_payload": {"authorizations": [{"numero_autorizacion": "123"}]},
+            "created_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "filename": "invoice.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 123,
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/parse/job-123")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job_id": "job-123",
+        "document_id": "job-123",
+        "job_type": "parse",
+        "status": "completed",
+        "created_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "filename": "invoice.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 123,
+        "result": {"authorizations": [{"numero_autorizacion": "123"}]},
+    }
+
+
+def test_jobs_status_endpoint_returns_failed_job(monkeypatch) -> None:
+    monkeypatch.setattr(
+        jobs_route_module,
+        "get_processing_job",
+        lambda job_id: {
+            "job_id": job_id,
+            "document_id": job_id,
+            "job_type": "parse",
+            "status": "failed",
+            "error_type": "internal_error",
+            "error_message": "boom",
+            "created_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "filename": "invoice.pdf",
+            "content_type": "application/pdf",
+            "size_bytes": 123,
+        },
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/jobs/job-err")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "job_id": "job-err",
+        "document_id": "job-err",
+        "job_type": "parse",
+        "status": "failed",
+        "created_at": None,
+        "started_at": None,
+        "finished_at": None,
+        "filename": "invoice.pdf",
+        "content_type": "application/pdf",
+        "size_bytes": 123,
+        "error_type": "internal_error",
+        "error": "boom",
+    }
 
 
 def test_extract_patient_endpoint_with_mocked_structured_output(tmp_path: Path) -> None:
@@ -145,6 +254,8 @@ def test_extract_patient_endpoint_with_mocked_structured_output(tmp_path: Path) 
     assert data["patient"]["nombre_completo"] == "Ana Gomez"
     assert data["patient"]["direccion"] == "Calle 1"
     assert data["patient"]["telefonos"]["movil"] == "3001234567"
+    assert "fhir" in data
+    assert data["fhir"]["resourceType"] == "Patient"
     assert calls["document_id"] == data["document_id"]
 
 
