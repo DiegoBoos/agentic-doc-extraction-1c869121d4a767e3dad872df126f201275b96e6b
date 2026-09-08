@@ -6,23 +6,26 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.core.config import Settings
-from app.dependencies.services import get_settings, require_api_key
-from app.schemas.payment_file_report import PaymentFileReport
+from app.dependencies.services import get_parser, get_settings, require_api_key
+from app.schemas.payment_file_report import PaymentFileReportBatch
+from app.services.document_parser import DocumentParserRouter
 from app.services.file_ingest import FileTooLargeError, save_upload
-from app.services.payment_file_parser import PaymentFileParseError, parse_payment_file_report
+from app.services.payment_file_parser import PaymentFileParseError, parse_payment_file_reports
 
 router = APIRouter(prefix="/payment-files", tags=["payment-files"])
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
+ParserDep = Annotated[DocumentParserRouter, Depends(get_parser)]
 UploadFileDep = Annotated[UploadFile, File(...)]
 
 
-@router.post("/parse", status_code=status.HTTP_200_OK, response_model=PaymentFileReport)
+@router.post("/parse", status_code=status.HTTP_200_OK, response_model=PaymentFileReportBatch)
 async def parse_payment_file(
     file: UploadFileDep,
     settings: SettingsDep,
+    parser: ParserDep,
     _auth: None = Depends(require_api_key),
-) -> PaymentFileReport:
+) -> PaymentFileReportBatch:
     if not file.filename:
         raise HTTPException(status_code=400, detail="File name is required")
 
@@ -43,7 +46,12 @@ async def parse_payment_file(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     try:
-        return parse_payment_file_report(Path(saved.stored_path))
+        reports = await parse_payment_file_reports(
+            Path(saved.stored_path),
+            parser=parser,
+            document_id=saved.id,
+        )
+        return PaymentFileReportBatch(reports=reports)
     except PaymentFileParseError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)

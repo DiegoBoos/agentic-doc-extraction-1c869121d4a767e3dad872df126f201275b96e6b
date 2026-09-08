@@ -156,3 +156,9 @@ class PaymentFileReport(BaseModel):
         if value is None or isinstance(value, Decimal):
             return value
         return parse_cop_amount(str(value))
+
+
+class PaymentFileReportBatch(BaseModel):
+    """Response envelope: a PDF may bundle several reports back to back."""
+
+    reports: list[PaymentFileReport] = Field(default_factory=list)
