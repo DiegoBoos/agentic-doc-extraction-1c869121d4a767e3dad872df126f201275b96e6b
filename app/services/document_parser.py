@@ -45,6 +45,18 @@ class ParsedDocumentResult:
     provider: ParserProvider = "google_vision"
 
 
+@dataclass(slots=True)
+class ParsedTablesResult:
+    """Row-major table cells plus the surrounding non-table text (titles,
+    timestamps, etc). Table structure is extracted via a layout model rather
+    than a read model, since read-model reading order can interleave columns
+    of a multi-column key-value grid unpredictably.
+    """
+
+    content: str
+    tables: list[list[list[str]]]
+
+
 class BaseDocumentParser:
     provider: ParserProvider
 
@@ -52,6 +64,9 @@ class BaseDocumentParser:
         raise NotImplementedError
 
     def parse_first_page(self, *, document_path: Path, document_id: str) -> ParsedDocumentResult:
+        raise NotImplementedError
+
+    def parse_tables(self, *, document_path: Path, document_id: str) -> ParsedTablesResult:
         raise NotImplementedError
 
 
@@ -165,6 +180,41 @@ class AzureDocumentIntelligenceParser(BaseDocumentParser):
             model=self.model,
             provider=self.provider,
         )
+
+    def parse_tables(self, *, document_path: Path, document_id: str) -> ParsedTablesResult:
+        started_at = time.perf_counter()
+        file_bytes = document_path.read_bytes()
+
+        logger.info(
+            "Starting Azure layout table extraction | document_id=%s file=%s bytes=%s",
+            document_id,
+            document_path.name,
+            len(file_bytes),
+        )
+        poller = self.client.begin_analyze_document(
+            "prebuilt-layout",
+            AnalyzeDocumentRequest(bytes_source=file_bytes),
+        )
+        result = poller.result()
+
+        tables: list[list[list[str]]] = []
+        for table in result.tables or []:
+            grid = [["" for _ in range(table.column_count)] for _ in range(table.row_count)]
+            for cell in table.cells:
+                grid[cell.row_index][cell.column_index] = cell.content
+            tables.append(grid)
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        logger.info(
+            "Completed Azure layout table extraction | document_id=%s file=%s "
+            "tables=%s elapsed_ms=%.2f",
+            document_id,
+            document_path.name,
+            len(tables),
+            elapsed_ms,
+        )
+
+        return ParsedTablesResult(content=getattr(result, "content", "") or "", tables=tables)
 
     def _extract_chunks(self, result: Any) -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
@@ -393,6 +443,20 @@ class DocumentParserRouter:
         )
         parser = self._select_parser("azure")
         return parser.parse_first_page(document_path=document_path, document_id=document_id)
+
+    def parse_tables(
+        self,
+        *,
+        document_path: Path,
+        document_id: str,
+    ) -> ParsedTablesResult:
+        logger.info(
+            "Routing table extraction | document_id=%s provider=azure file=%s",
+            document_id,
+            document_path.name,
+        )
+        parser = self._select_parser("azure")
+        return parser.parse_tables(document_path=document_path, document_id=document_id)
 
     def _select_parser(self, selected: ParserProvider) -> BaseDocumentParser:
         parser = self.parsers.get(selected)
